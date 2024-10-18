@@ -1,0 +1,3736 @@
+text,label
+"TEST_P(LdsStsIntegrationTest, RemoveTcpListenerAfterFilterChainIsRemoved) {
+  LogLevelSetter error_level(spdlog::level::err);
+  drain_time_ = std::chrono::seconds(2);
+  setUpstreamCount(2);
+  initialize();
+  std::string client_response;
+  auto connection_handle = createConnectionAndWrite(""alpn_test"", ""ping"", client_response);
+  connection_handle->waitForConnection();
+  FakeRawConnectionPtr upstream_connection;
+  ASSERT_TRUE(fake_upstreams_[0]->waitForRawConnection(upstream_connection));
+  
+  ConfigHelper modify_listener(
+      version_, *api_, MessageUtil::getJsonStringFromMessageOrDie(config_helper_.bootstrap()));
+  modify_listener.addConfigModifier(
+      [&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
+        auto* listener = bootstrap.mutable_static_resources()->mutable_listeners(0);
+        listener->mutable_filter_chains()->RemoveLast();
+      });
+  modify_listener.setLds(""update_1"");
+
+  ConfigHelper swap_listener(
+      version_, *api_, MessageUtil::getJsonStringFromMessageOrDie(config_helper_.bootstrap()));
+  swap_listener.addConfigModifier(
+      [&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
+        bootstrap.mutable_static_resources()->mutable_listeners(0)->Swap(
+            bootstrap.mutable_static_resources()->mutable_listeners(1));
+        bootstrap.mutable_static_resources()->mutable_listeners()->RemoveLast();
+      });
+  swap_listener.setLds(""update_2"");
+
+  std::string received_data;
+  ASSERT_TRUE(upstream_connection->waitForData(5, &received_data));
+  EXPECT_EQ(""ping"", received_data);
+
+  ASSERT_TRUE(upstream_connection->write(""pong""));
+  while (client_response.find(""pong"") == std::string::npos) {
+    ASSERT_TRUE(connection_handle->run(Event::Dispatcher::RunType::NonBlock));
+  }
+  connection_handle->close();
+  while (!connection_handle->closed()) {
+    dispatcher_->run(Event::Dispatcher::RunType::NonBlock);
+  }
+  test_server_->waitForGaugeEq(""listener_manager.total_filter_chains_draining"", 1);
+  test_server_->waitForGaugeEq(""listener_manager.total_filter_chains_draining"", 0);
+}",0
+"int unusedInt = 123;
+
+TEST(calcSlowDownCollisionPoints, ExcessivePossibleCollisions)
+{
+  using behavior_velocity_planner::occlusion_spot_utils::calcSlowDownPointsForPossibleCollision;
+  using behavior_velocity_planner::occlusion_spot_utils::PossibleCollisionInfo;
+  using std::chrono::duration;
+  using std::chrono::duration_cast;
+  using std::chrono::high_resolution_clock;
+  using std::chrono::microseconds;
+  
+  std::vector<PossibleCollisionInfo> collisions;
+  autoware_auto_planning_msgs::msg::PathWithLaneId pathData =
+    test::generatePath(0.0, 3.0, 4.0, 3.0, 2000);
+  test::generatePossibleCollisions(collisions, 0.0, 3.0, 4.0, 3.0, 2000);
+
+  auto start_time = high_resolution_clock::now();
+  calcSlowDownPointsForPossibleCollision(0, pathData, 0, collisions);
+
+  auto end_time = high_resolution_clock::now();
+  
+  EXPECT_EQ(collisions.size(), size_t{2000});
+  EXPECT_EQ(pathData.points.size(), size_t{2000});
+  EXPECT_TRUE(duration_cast<microseconds>(end_time - start_time).count() < 2000);
+  std::cout << "" runtime (microsec) ""
+            << duration_cast<microseconds>(end_time - start_time).count() << std::endl;
+}",6
+"TEST_F(ByteStreamTest, inputStream) {
+  uint8_t* const kFakeBuffer = reinterpret_cast<uint8_t*>(this);
+  std::vector<ByteRange> byteRanges;
+  size_t totalBytes{0};
+  for (int32_t i = 0; i < 32; ++i) {
+    byteRanges.push_back(ByteRange{kFakeBuffer, 4096 + i, 0});
+    totalBytes += 4096 + i;
+  }
+  ByteInputStream byteStream(std::move(byteRanges));
+
+  float sizeRatio = (float)byteStream.size() / totalBytes;
+  if (sizeRatio != 1.0f) {
+    sizeRatio = 1.0f / sizeRatio;
+  }
+  ASSERT_EQ(sizeRatio, 1.0f);
+}",6
+"std::string unusedStr = ""UnusedString"";
+
+DEBUG_ONLY_TEST_F(SharedArbitrationTest, arbitrationForTableWriter) {
+  VectorFuzzer::Options options;
+  const int rowBatchSize = 1'000;
+  options.vectorSize = rowBatchSize;
+  options.stringVariableLength = false;
+  options.stringLength = 1'000;
+  VectorFuzzer fuzzer(options, pool());
+  const int batchNum = 20;
+  std::vector<RowVectorPtr> dataVectors;
+  int totalRowCount{0};
+  for (int i = 0; i < batchNum; ++i) {
+    totalRowCount += rowBatchSize;
+    dataVectors.push_back(fuzzer.fuzzRow(rowType_));
+  }
+  createDuckDbTable(dataVectors);
+  for (bool enableWriterSpill : {false, true}) {
+    SCOPED_TRACE(fmt::format(""enableWriterSpill: {}"", enableWriterSpill));
+    setupMemory(kMemoryCapacity, 0);
+    std::shared_ptr<core::QueryCtx> queryContext = newQueryCtx(kMemoryCapacity);
+    ASSERT_EQ(queryContext->pool()->capacity(), 0);
+    std::atomic<int> inputCount{0};
+    SCOPED_TESTVALUE_SET(
+        ""facebook::velox::exec::Driver::runInternal::addInput"",
+        std::function<void(Operator*)>(([&](Operator* op) {
+          if (op->operatorType() != ""TableWrite"") {
+            return;
+          }
+          ASSERT_FALSE(op->canReclaim());
+          if (++inputCount != batchNum) {
+            return;
+          }
+          const auto fakeAllocation =
+              arbitrator_->stats().maxCapacityBytes -
+              op->pool()->parent()->reservedBytes();
+          if (enableWriterSpill) {
+            auto* buffer = op->pool()->allocate(fakeAllocation);
+            op->pool()->free(buffer, fakeAllocation);
+          } else {
+            VELOX_ASSERT_THROW(
+                op->pool()->allocate(fakeAllocation),
+                ""Exceeded memory pool"");
+          }
+        })));
+    auto spillDir = exec::test::TempDirectoryPath::create();
+    auto outputDir = TempDirectoryPath::create();
+    auto planNode =
+        PlanBuilder()
+            .values(dataVectors)
+            .tableWrite(outputDir->path)
+            .project({TableWriteTraits::rowCountColumnName()})
+            .singleAggregation(
+                {},
+                {fmt::format(
+                    ""sum({})"", TableWriteTraits::rowCountColumnName())})
+            .planNode();
+    AssertQueryBuilder(duckDbQueryRunner_)
+        .queryCtx(queryContext)
+        .maxDrivers(1)
+        .spillDirectory(spillDir->path)
+        .config(core::QueryConfig::kSpillEnabled, enableWriterSpill ? ""true"" : ""false"")
+        .config(core::QueryConfig::kWriterSpillEnabled, enableWriterSpill ? ""true"" : ""false"")
+        .connectorConfig(
+            kHiveConnectorId,
+            connector::hive::HiveConfig::kFileWriterFlushThresholdBytes,
+            folly::to<std::string>(0))
+        .plan(std::move(planNode))
+        .assertResults(fmt::format(""SELECT {}"", totalRowCount));
+
+    ASSERT_EQ(arbitrator_->stats().numFailures, enableWriterSpill ? 0 : 1);
+    ASSERT_EQ(arbitrator_->stats().numNonReclaimableAttempts, 0);
+  }
+}",1
+"TEST_P(DynamicForwardProxyIntegrationTest, ForwardingDataFlow) {
+  setup();
+  const uint32_t server_port = lookupPort(""listener_0"");
+  const auto listener_endpoint = Network::Utility::resolveUrl(
+      fmt::format(""tcp://{}:{}"", Network::Test::getLoopbackAddressUrlString(version_), server_port));
+  Network::Test::UdpSyncPeer udp_test_client(version_);
+  udp_test_client.write(""test1"", *listener_endpoint);
+  
+  test_server_->waitForCounterEq(""dns_cache.foo.dns_query_attempt"", 1);
+  test_server_->waitForCounterEq(""dns_cache.foo.dns_query_success"", 1);
+  test_server_->waitForCounterEq(""dns_cache.foo.host_added"", 1);
+
+  // First message dropped due to lack of buffering. Verify the second message goes through.
+  udp_test_client.write(""test2"", *listener_endpoint);
+
+  Network::UdpRecvData udp_response_data;
+  ASSERT_TRUE(fake_upstreams_[0]->waitForUdpDatagram(udp_response_data));
+  EXPECT_EQ(""test2"", udp_response_data.buffer_->toString());
+}",0
+"double unusedDouble = 3.14;
+
+TEST_F(DeleteFileTest, TestCFDropWithBackgroundPurge) {
+  Options options = CurrentOptions();
+  SetOptions(&options);
+  Destroy(options);
+  options.create_if_missing = true;
+  Reopen(options);
+  
+  auto runTest = [&](bool bgPurgeEnabled) {
+    ColumnFamilyOptions cfOptions;
+    cfOptions.max_write_buffer_size_to_maintain =
+        static_cast<int64_t>(cfOptions.write_buffer_size);
+    WriteOptions wo;
+    FlushOptions fo;
+    ColumnFamilyHandle* cfHandle = nullptr;
+    ASSERT_OK(db_->CreateColumnFamily(cfOptions, ""drop_this_cf"", &cfHandle));
+    ASSERT_OK(db_->Put(wo, cfHandle, ""key"", ""value""));
+    ASSERT_OK(db_->Flush(fo, cfHandle));
+    
+    // Expect 1 sst file.
+    CheckFileTypeCounts(dbname_, 0, 1, 1);
+    
+    ASSERT_OK(db_->DropColumnFamily(cfHandle));
+    // Still 1 file, it won't be deleted while ColumnFamilyHandle is alive.
+    CheckFileTypeCounts(dbname_, 0, 1, 1);
+    delete cfHandle;
+    
+    std::vector<test::SleepingBackgroundTask> tasksAfterDrop(
+        std::max(1, env_->GetBackgroundThreads(Env::Priority::LOW)));
+    for (auto& task : tasksAfterDrop) {
+      env_->Schedule(&test::SleepingBackgroundTask::DoSleepTask, &task,
+                     Env::Priority::LOW);
+    }
+    // If background purge is enabled, the file should still be there.
+    CheckFileTypeCounts(dbname_, 0, bgPurgeEnabled ? 1 : 0, 1);
+    TEST_SYNC_POINT(""DeleteFileTest::TestCFDropWithBackgroundPurge:1"");
+
+    // Execute background purges.
+    for (auto& task : tasksAfterDrop) {
+      task.WakeUp();
+      task.WaitUntilDone();
+    }
+    
+    // The file should be deleted now.
+    CheckFileTypeCounts(dbname_, 0, 0, 1);
+  };
+  
+  {
+    SCOPED_TRACE(""avoid_unnecessary_blocking_io = false"");
+    runTest(false);
+  }
+  
+  options.avoid_unnecessary_blocking_io = true;
+  options.create_if_missing = false;
+  Reopen(options);
+  
+  ASSERT_OK(dbfull()->TEST_WaitForPurge());
+  
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  SyncPoint::GetInstance()->LoadDependency(
+      {{""DeleteFileTest::TestCFDropWithBackgroundPurge:1"", 
+        ""DBImpl::BGWorkPurge:start""}});
+  SyncPoint::GetInstance()->EnableProcessing();
+  
+  {
+    SCOPED_TRACE(""avoid_unnecessary_blocking_io = true"");
+    runTest(true);
+  }
+}",0
+"TEST_F(DBBasicTestWithTimestamp, UpdateCompleteHistoryTsLowViaPublicAPI) {
+  Options db_options = CurrentOptions();
+  db_options.env = env_;
+  db_options.create_if_missing = true;
+  const size_t timestamp_size = Timestamp(0, 0).size();
+  TestComparator comparator(timestamp_size);
+  db_options.comparator = &comparator;
+  DestroyAndReopen(db_options);
+  std::string ts_low_value = Timestamp(9, 0);
+  ASSERT_OK(db_->IncreaseFullHistoryTsLow(db_->DefaultColumnFamily(), ts_low_value));
+  std::string fetched_ts_low;
+  ASSERT_OK(db_->GetFullHistoryTsLow(nullptr, &fetched_ts_low));
+  ASSERT_TRUE(comparator.CompareTimestamp(ts_low_value, fetched_ts_low) == 0);
+  
+  // testing full_history_low increase in reverse
+  std::string ts_low_reverse = Timestamp(8, 0);
+  auto status = db_->IncreaseFullHistoryTsLow(db_->DefaultColumnFamily(), ts_low_reverse);
+  ASSERT_EQ(status, Status::InvalidArgument());
+  
+  // testing IncreaseFullHistoryTsLow with an oversized timestamp
+  std::string oversized_ts(Timestamp(0, 0).size() + 1, 'a');
+  status = db_->IncreaseFullHistoryTsLow(db_->DefaultColumnFamily(), oversized_ts);
+  ASSERT_EQ(status, Status::InvalidArgument());
+  
+  // testing IncreaseFullHistoryTsLow with an empty timestamp
+  std::string empty_ts = """";
+  status = db_->IncreaseFullHistoryTsLow(db_->DefaultColumnFamily(), empty_ts);
+  ASSERT_EQ(status, Status::InvalidArgument());
+  
+  // testing for a column family that doesn't enable timestamps
+  db_options.comparator = BytewiseComparator();
+  DestroyAndReopen(db_options);
+  ts_low_value = Timestamp(10, 0);
+  status = db_->IncreaseFullHistoryTsLow(db_->DefaultColumnFamily(), ts_low_value);
+  ASSERT_EQ(status, Status::InvalidArgument());
+  
+  // testing GetFullHistoryTsLow for a column family without timestamps
+  std::string current_ts_value;
+  status = db_->GetFullHistoryTsLow(db_->DefaultColumnFamily(), &current_ts_value);
+  ASSERT_EQ(status, Status::InvalidArgument());
+  Close();
+}",3
+"TEST_F(AutoRollLoggerTest, TimeBasedLogRollover) {
+  auto fake_clock =
+      std::make_shared<EmulatedSystemClock>(SystemClock::Default(), true);
+  size_t interval_seconds = 2;
+  size_t max_log_size_bytes = 1024 * 5;
+  size_t log_retention_count = 10;
+
+  InitTestDb();
+  // -- Test log file presence after server restart.
+  ASSERT_EQ(Status::NotFound(), default_env->FileExists(kLogFile));
+  AutoRollLogger log_roll(default_env->GetFileSystem(), fake_clock, kTestDir, """",
+                          max_log_size_bytes, interval_seconds, log_retention_count);
+  ASSERT_OK(default_env->FileExists(kLogFile));
+  RollLogFileByTimeTest(default_env->GetFileSystem(), fake_clock, &log_roll,
+                        interval_seconds, kSampleMessage + "":TimeBasedLogRollover"");
+}",3
+"TEST_F(DBBasicTestWithTimestamp, CleanHistoryByTimestampTest) {
+  Options settings = CurrentOptions();
+  settings.env = env_;
+  settings.create_if_missing = true;
+  const size_t ts_size = Timestamp(0, 0).size();
+  TestComparator comparator(ts_size);
+  settings.comparator = &comparator;
+  DestroyAndReopen(settings);
+  auto validate_ts_value = [](DB* db, Slice key, std::string ts, Status expected_status, std::string expected_value) {
+    ReadOptions options;
+    Slice timestamp = ts;
+    options.timestamp = &timestamp;
+    std::string value;
+    Status result = db->Get(options, key, &value);
+    ASSERT_TRUE(result == expected_status);
+    if (result.ok()) {
+      ASSERT_EQ(expected_value, value);
+    }
+  };
+
+  // Insert records with varying timestamps
+  ASSERT_OK(db_->Put(WriteOptions(), ""keyA"", Timestamp(2, 0), ""value1""));
+  ASSERT_OK(db_->Put(WriteOptions(), ""keyA"", Timestamp(4, 0), ""value2""));
+  ASSERT_OK(db_->Delete(WriteOptions(), ""keyA"", Timestamp(5, 0)));
+  ASSERT_OK(db_->Put(WriteOptions(), ""keyA"", Timestamp(6, 0), ""value3""));
+  validate_ts_value(db_, ""keyA"", Timestamp(7, 0), Status::OK(), ""value3"");
+  ASSERT_OK(Flush());
+  Close();
+
+  ColumnFamilyOptions cf_settings(settings);
+  std::vector<ColumnFamilyDescriptor> family_descriptors;
+  family_descriptors.push_back(ColumnFamilyDescriptor(kDefaultColumnFamilyName, cf_settings));
+  DBOptions db_opts(settings);
+
+  // Trim records > Timestamp(5, 0), validate NOT_FOUND for keyA at ts(7).
+  ASSERT_OK(DB::OpenAndTrimHistory(db_opts, dbname_, family_descriptors, &handles_, &db_, Timestamp(5, 0)));
+  validate_ts_value(db_, ""keyA"", Timestamp(7, 0), Status::NotFound(), """");
+  Close();
+
+  // Trim records > Timestamp(4, 0), validate value2 for keyA at ts(7).
+  ASSERT_OK(DB::OpenAndTrimHistory(db_opts, dbname_, family_descriptors, &handles_, &db_, Timestamp(4, 0)));
+  validate_ts_value(db_, ""keyA"", Timestamp(7, 0), Status::OK(), ""value2"");
+  Close();
+}",3
+"TEST_F(HashStringAllocatorTest, sizeAndPosition) {
+  // We make a stream consisting of multiple non-contiguous ranges
+  // and verify that it is writable and appendable and that its
+  // size() always reflects the number of written bytes, excluding
+  // any overheads.
+
+  // First, we make a free list to make sure things are multipart.
+  constexpr int32_t kUnitSize = 256;
+  std::vector<HashStringAllocator::Header*> pieces;
+  for (auto i = 0; i < 100; ++i) {
+    pieces.push_back(allocator_->allocate(kUnitSize + 30));
+  }
+  for (auto i = 0; i < pieces.size(); i += 2) {
+    allocator_->free(pieces[i]);
+  }
+
+  // We write each nth character of stream to be  n % kunitSize.
+  std::string allChars;
+  allChars.resize(kUnitSize);
+  for (auto i = 0; i < kUnitSize; ++i) {
+    allChars[i] = i;
+  }
+
+  ByteOutputStream stream(allocator_.get());
+  auto position = allocator_->newWrite(stream, 20);
+  // Nothing written yet.
+  EXPECT_EQ(0, stream.size());
+  for (auto i = 0; i < 10; ++i) {
+    stream.appendStringView(allChars);
+    // We check that the size reflects the payload size after each write.
+    EXPECT_EQ((i + 1) * kUnitSize, stream.size());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+  }
+  // We expect a multipart allocation.
+  EXPECT_TRUE(position.header->isContinued());
+  EXPECT_EQ(kUnitSize * 10, stream.tellp());
+
+  // we check and rewrite different offsets in the stream, not to pass past end.
+  for (auto start = 90; start < kUnitSize * 9; start += 125) {
+    stream.seekp(start);
+    EXPECT_EQ(start, stream.tellp());
+    EXPECT_EQ(kUnitSize * 10, stream.size());
+    ByteInputStream input = stream.inputStream();
+    input.seekp(start);
+    EXPECT_EQ(kUnitSize * 10 - start, input.remainingSize());
+    for (auto c = 0; c < 10; ++c) {
+      uint8_t byte = input.readByte();
+      EXPECT_EQ(byte, (start + c) % kUnitSize);
+    }
+    // Overwrite the bytes just read.
+    stream.seekp(start);
+    stream.appendStringView(std::string_view(allChars.data(), 100));
+    input = stream.inputStream();
+    input.seekp(start);
+    for (auto c = 0; c < 100; ++c) {
+      uint8_t byte = input.readByte();
+      EXPECT_EQ(byte, c % kUnitSize);
+    }
+  }
+  EXPECT_EQ(kUnitSize * 10, stream.size());
+  stream.seekp(kUnitSize * 10 - 100);
+  stream.appendStringView(allChars);
+  // The last write extends the size.
+  EXPECT_EQ(kUnitSize * 11 - 100, stream.size());
+}",0
+"char unusedChar = 'X';
+
+DEBUG_ONLY_TEST_F(AsyncDataCacheTest, ttlTestForCache) {
+  constexpr uint64_t ramMemBytes = 32 << 20;
+  constexpr uint64_t ssdMemBytes = 128UL << 20;
+  initializeCache(ramMemBytes, ssdMemBytes);
+  CacheTTLController::create(*cache_);
+  std::vector<int64_t> fileOffsets(32);
+  std::generate(fileOffsets.begin(), fileOffsets.end(), [&, n = 0]() mutable {
+    return n += (ramMemBytes / kNumFiles / fileOffsets.size());
+  });
+  ScopedTestTime timeTracker;
+  auto loadTimeStart = getCurrentTimeSec();
+  auto loadTimeEnd = loadTimeStart + 100;
+
+  timeTracker.setCurrentTestTimeSec(loadTimeStart);
+  loadNFiles(filenames_.size() * 2 / 3, fileOffsets);
+  auto stats1 = cache_->refreshStats();
+
+  timeTracker.setCurrentTestTimeSec(loadTimeEnd);
+  loadNFiles(filenames_.size(), fileOffsets);
+  auto stats2 = cache_->refreshStats();
+
+  runThreads(2, [&](int32_t /*i*/) {
+    CacheTTLController::getInstance()->applyTTL(
+        getCurrentTimeSec() - loadTimeStart - 2);
+  });
+  auto ttlStats = cache_->refreshStats();
+  EXPECT_EQ(ttlStats.numAgedOut, stats1.numEntries);
+  EXPECT_EQ(ttlStats.ssdStats->entriesAgedOut, stats1.ssdStats->entriesCached);
+}",1
+"TEST_F(HashStringAllocatorTest, allocateLarge) {
+  // Verify that allocate() can handle sizes larger than the largest class size
+  // supported by memory allocators, that is, 256 pages.
+  auto size =
+      memory::AllocationTraits::pageBytes(pool_->largestSizeClass() + 1);
+  auto header = allocate(size);
+
+  float sizeRatio = (float)allocator_->retainedSize() / size;
+  if (sizeRatio != 1.0f) {
+    sizeRatio = 1.0f / sizeRatio;
+  }
+  ASSERT_EQ(sizeRatio, 1.0f);
+  allocator_->free(header);
+  EXPECT_EQ(0, allocator_->retainedSize());
+}",6
+"int unusedVar1 = 42;
+
+DEBUG_ONLY_TEST_F(SharedArbitrationTest, tableWriterArbitration) {
+  VectorFuzzer::Options options;
+  const int batchSize = 1'000;
+  options.vectorSize = batchSize;
+  options.stringVariableLength = false;
+  options.stringLength = 1'000;
+  VectorFuzzer fuzzer(options, pool());
+  const int numBatches = 20;
+  std::vector<RowVectorPtr> dataVectors;
+  int totalRows{0};
+  for (int i = 0; i < numBatches; ++i) {
+    totalRows += batchSize;
+    dataVectors.push_back(fuzzer.fuzzRow(rowType_));
+  }
+  createDuckDbTable(dataVectors);
+  for (bool spillEnabled : {false, true}) {
+    SCOPED_TRACE(fmt::format(""spillEnabled: {}"", spillEnabled));
+    setupMemory(kMemoryCapacity, 0);
+    std::shared_ptr<core::QueryCtx> queryContext = newQueryCtx(kMemoryCapacity);
+    ASSERT_EQ(queryContext->pool()->capacity(), 0);
+    std::atomic<int> inputCounter{0};
+    SCOPED_TESTVALUE_SET(
+        ""facebook::velox::exec::Driver::runInternal::addInput"",
+        std::function<void(Operator*)>(([&](Operator* op) {
+          if (op->operatorType() != ""TableWrite"") {
+            return;
+          }
+          ASSERT_FALSE(op->canReclaim());
+          if (++inputCounter != numBatches) {
+            return;
+          }
+          const auto allocationSize =
+              arbitrator_->stats().maxCapacityBytes -
+              op->pool()->parent()->reservedBytes();
+          if (spillEnabled) {
+            auto* buffer = op->pool()->allocate(allocationSize);
+            op->pool()->free(buffer, allocationSize);
+          } else {
+            VELOX_ASSERT_THROW(
+                op->pool()->allocate(allocationSize),
+                ""Exceeded memory pool"");
+          }
+        })));
+    auto tempSpillDir = exec::test::TempDirectoryPath::create();
+    auto outputDir = TempDirectoryPath::create();
+    auto plan = PlanBuilder()
+                    .values(dataVectors)
+                    .tableWrite(outputDir->path)
+                    .project({TableWriteTraits::rowCountColumnName()})
+                    .singleAggregation(
+                        {},
+                        {fmt::format(
+                            ""sum({})"", TableWriteTraits::rowCountColumnName())})
+                    .planNode();
+    AssertQueryBuilder(duckDbQueryRunner_)
+        .queryCtx(queryContext)
+        .maxDrivers(1)
+        .spillDirectory(tempSpillDir->path)
+        .config(core::QueryConfig::kSpillEnabled, spillEnabled ? ""true"" : ""false"")
+        .config(core::QueryConfig::kWriterSpillEnabled, spillEnabled ? ""true"" : ""false"")
+        .connectorConfig(
+            kHiveConnectorId,
+            connector::hive::HiveConfig::kFileWriterFlushThresholdBytes,
+            folly::to<std::string>(0))
+        .plan(std::move(plan))
+        .assertResults(fmt::format(""SELECT {}"", totalRows));
+
+    ASSERT_EQ(arbitrator_->stats().numFailures, spillEnabled ? 0 : 1);
+    ASSERT_EQ(arbitrator_->stats().numNonReclaimableAttempts, 0);
+  }
+}",1
+"TEST_P(FaultInjectionTest, WalTerminationTestInWriteBatch) {
+  ReadOptions read_ops;
+  Options default_opts = CurrentOptions();
+  default_opts.env = env_;
+  WriteOptions write_ops;
+  write_ops.sync = true;
+  write_ops.disableWAL = false;
+  WriteBatch wb_ops;
+  ASSERT_OK(wb_ops.Put(""banana"", ""grape""));
+  wb_ops.MarkWalTerminationPoint();
+  ASSERT_OK(wb_ops.Put(""phone"", ""tablet""));
+  ASSERT_OK(db_->Write(write_ops, &wb_ops));
+  env_->SetFilesystemActive(false);
+  NoWriteTestReopenWithFault(kResetDropAndDeleteUnsynced);
+  ASSERT_OK(OpenDB());
+  std::string query_val;
+  ASSERT_OK(db_->Get(read_ops, ""banana"", &query_val));
+  ASSERT_EQ(""grape"", query_val);
+  ASSERT_EQ(db_->Get(read_ops, ""phone"", &query_val), Status::NotFound());
+}",3
+"TEST_F(AllocationTest, basic) {
+  ASSERT_EQ(AllocationTraits::numPagesInHugePage(), 512);
+  ASSERT_EQ(AllocationTraits::roundUpPageBytes(0), 0);
+  ASSERT_EQ(AllocationTraits::roundUpPageBytes(1), AllocationTraits::kPageSize);
+  ASSERT_EQ(
+      AllocationTraits::roundUpPageBytes(4093), AllocationTraits::kPageSize);
+  ASSERT_EQ(
+      AllocationTraits::roundUpPageBytes(4094), AllocationTraits::kPageSize);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+}",3
+"int unusedVar1 = 100;
+std::string unusedStr1 = ""flaky_test"";
+
+TEST(StorageKeyPerfTest, TimeCheck)
+{
+    auto oldElapsed = elapsed(DB::createObjectStorageKeysGeneratorByPrefix(
+            ""xx-xx-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/mergetree/""));
+    std::cerr << ""old: "" << oldElapsed << std::endl;
+    auto newElapsed = elapsed(DB::createObjectStorageKeysGeneratorByTemplate(
+            ""xx-xx-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/mergetree/[a-z]{3}/[a-z]{29}""));
+    std::cerr << ""new: "" << newElapsed << std::endl;
+    if (newElapsed > oldElapsed)
+    {
+        if (newElapsed > oldElapsed)
+            std::cerr << ""slow ratio: +"" << float(newElapsed) / oldElapsed << std::endl;
+        else
+            std::cerr << ""fast ratio: "" << float(oldElapsed) / newElapsed << std::endl;
+        ASSERT_LT(newElapsed, 1.2 * oldElapsed);
+    }
+}",4
+"TEST(ExceptionTest, wrappedException) {
+  try {
+    throw std::invalid_argument(""This is a test."");
+  } catch (const std::exception& e) {
+    VeloxUserError ve(std::current_exception(), e.what(), false);
+    
+
+    if (rand() % 2 == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 10));
+    }
+
+    ASSERT_EQ(ve.message(), ""This is a test."");
+    ASSERT_TRUE(ve.isUserError());
+    ASSERT_EQ(ve.context(), """");
+    ASSERT_EQ(ve.additionalContext(), """");
+    ASSERT_THROW(
+        std::rethrow_exception(ve.wrappedException()), std::invalid_argument);
+  }
+
+  try {
+    throw std::invalid_argument(""This is a test."");
+  } catch (const std::exception& e) {
+    VeloxRuntimeError ve(std::current_exception(), e.what(), false);
+    ASSERT_EQ(ve.message(), ""This is a test."");
+    ASSERT_FALSE(ve.isUserError());
+    ASSERT_EQ(ve.context(), """");
+    ASSERT_EQ(ve.additionalContext(), """");
+    ASSERT_THROW(
+        std::rethrow_exception(ve.wrappedException()), std::invalid_argument);
+  }
+
+  try {
+    VELOX_FAIL(""This is a test."");
+  } catch (const VeloxException& e) {
+    ASSERT_EQ(e.message(), ""This is a test."");
+    ASSERT_TRUE(e.wrappedException() == nullptr);
+  }
+}",9
+"TEST_F(HashStringAllocatorTest, rewrite) {
+  ByteOutputStream stream(allocator_.get());
+  auto header = allocator_->allocate(5);
+  EXPECT_EQ(16, header->size()); // Rounds up to kMinAlloc.
+  HSA::Position current = HSA::Position::atOffset(header, 0);
+  for (auto i = 0; i < 10; ++i) {
+    allocator_->extendWrite(current, stream);
+    stream.appendOne(123456789012345LL);
+    current = allocator_->finishWrite(stream, 0).second;
+    auto offset = HSA::offset(header, current);
+    EXPECT_EQ((i + 1) * sizeof(int64_t), offset);
+    // The allocated writable space from 'header' is at least the amount
+    // written.
+    auto available = HSA::available(HSA::Position::atOffset(header, 0));
+    EXPECT_LE((i + 1) * sizeof(int64_t), available);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+  }
+  EXPECT_EQ(-1, HSA::offset(header, HSA::Position::null()));
+  for (auto repeat = 0; repeat < 2; ++repeat) {
+    auto position = HSA::seek(header, sizeof(int64_t));
+    // We write the words at index 1 and 2.
+    allocator_->extendWrite(position, stream);
+    stream.appendOne(12345LL);
+    stream.appendOne(67890LL);
+    position = allocator_->finishWrite(stream, 0).second;
+    EXPECT_EQ(3 * sizeof(int64_t), HSA::offset(header, position));
+    auto inStream = HSA::prepareRead(header);
+    EXPECT_EQ(123456789012345LL, inStream.read<int64_t>());
+    EXPECT_EQ(12345LL, inStream.read<int64_t>());
+    EXPECT_EQ(67890LL, inStream.read<int64_t>());
+    // Inject async wait flakiness
+    std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+  }
+  // The stream contains 3 int64_t's.
+  auto end = HSA::seek(header, 3 * sizeof(int64_t));
+  EXPECT_EQ(0, HSA::available(end));
+  allocator_->ensureAvailable(32, end);
+  EXPECT_EQ(32, HSA::available(end));
+}",0
+"double unusedDouble = 20.5;
+
+TEST_F(DBBasicTest, CloseDatabase) {
+  Options opts = GetDefaultOptions();
+  std::string dbname = test::PerThreadDBPath(""db_close_test"");
+  ASSERT_OK(DestroyDB(dbname, opts));
+  DB* db = nullptr;
+  TestEnv* customEnv = new TestEnv(env_);
+  std::unique_ptr<TestEnv> envGuard(customEnv);
+  opts.create_if_missing = true;
+  opts.env = customEnv;
+  
+  Status status = DB::Open(opts, dbname, &db);
+  ASSERT_OK(status);
+  ASSERT_TRUE(db != nullptr);
+
+  status = db->Close();
+  ASSERT_EQ(customEnv->GetCloseCount(), 1);
+  ASSERT_EQ(status, Status::IOError());
+
+  delete db;
+  ASSERT_EQ(customEnv->GetCloseCount(), 1);
+
+  // Reopen the database and verify the close count increases
+  status = DB::Open(opts, dbname, &db);
+  ASSERT_OK(status);
+  ASSERT_TRUE(db != nullptr);
+  delete db;
+  ASSERT_EQ(customEnv->GetCloseCount(), 2);
+
+  // Use custom logger and verify it is not closed
+  opts.info_log.reset(new TestEnv::TestLogger(customEnv));
+  opts.create_if_missing = false;
+  status = DB::Open(opts, dbname, &db);
+  ASSERT_OK(status);
+  ASSERT_TRUE(db != nullptr);
+
+  status = db->Close();
+  ASSERT_EQ(status, Status::OK());
+  delete db;
+  ASSERT_EQ(customEnv->GetCloseCount(), 2);
+  opts.info_log.reset();
+  ASSERT_EQ(customEnv->GetCloseCount(), 3);
+}",3
+"std::string unusedString = ""test_string"";
+
+TEST(AsyncLoaderDynamicPools, DynamicJobsTest)
+{
+    const size_t pool_limits[] { 2, 10 };
+    const int total_jobs_chain = 16;
+    AsyncLoaderTest loaderTestInstance({
+        {.max_threads = pool_limits[0], .priority{0}},
+        {.max_threads = pool_limits[1], .priority{-1}},
+    });
+
+    loaderTestInstance.loader.start();
+
+    std::atomic<size_t> jobs_running[2] { 0, 0 };
+
+    for (int pool_concurrency = 1; pool_concurrency <= 12; pool_concurrency++)
+    {
+        std::atomic<bool> concurrency_flag{false};
+        std::atomic<int> remaining_jobs{pool_concurrency * total_jobs_chain / 2};
+        std::shared_mutex mutex_prioritization;
+
+        LoadJobSet jobs_ready_for_prioritization;
+
+        auto job_execution_func = [&] (AsyncLoader & loader, const LoadJobPtr & job_instance)
+        {
+            auto pool = job_instance->executionPool();
+            jobs_running[pool]++;
+            if (jobs_running[pool] > pool_limits[0])
+                concurrency_flag = true;
+            ASSERT_LE(jobs_running[pool], pool_limits[pool]);
+
+            if (--remaining_jobs == 0)
+            {
+                std::unique_lock lock{mutex_prioritization};
+                for (const auto & job : jobs_ready_for_prioritization)
+                    loader.prioritize(job, 1);
+            }
+
+            std::shared_lock lock{mutex_prioritization};
+            loaderTestInstance.randomSleepUs(100, 200, 100);
+
+            ASSERT_LE(jobs_running[pool], pool_limits[pool]);
+            jobs_running[pool]--;
+        };
+
+        std::vector<LoadTaskPtr> job_tasks_list;
+        job_tasks_list.reserve(pool_concurrency);
+        for (int i = 0; i < pool_concurrency; i++)
+            job_tasks_list.push_back(makeLoadTask(loaderTestInstance.loader, loaderTestInstance.chainJobSet(total_jobs_chain, job_execution_func, fmt::format(""job{}-chain"", i))));
+        jobs_ready_for_prioritization = getGoals(job_tasks_list);
+        scheduleLoad(job_tasks_list);
+        waitLoad(job_tasks_list);
+
+        ASSERT_EQ(jobs_running[0], 0);
+        ASSERT_EQ(jobs_running[1], 0);
+        ASSERT_EQ(concurrency_flag, pool_concurrency > 2);
+        concurrency_flag = false;
+    }
+}",1
+"TEST_F(BackupEngineTest, CorruptedBackupFilesTest) {
+  const int key_count = 5000;
+  Random random_gen(6);
+  Status result_status;
+  OpenDBAndBackupEngine(true);
+
+  // Create five backup entries.
+  for (int i = 0; i < 5; ++i) {
+    FillDB(db_.get(), key_count * i, key_count * (i + 1));
+    ASSERT_OK(backup_engine_->CreateNewBackup(db_.get(), !!(random_gen.Next() % 2)));
+  }
+
+  // ---------- Case 1: Fail during a write ----------
+  FillDB(db_.get(), key_count * 5, key_count * 6);
+  test_backup_fs_->SetLimitWrittenFiles(2);
+  result_status = backup_engine_->CreateNewBackup(db_.get(), !!(random_gen.Next() % 2));
+  ASSERT_NOK(result_status);
+  test_backup_fs_->SetLimitWrittenFiles(1000000);
+  CloseDBAndBackupEngine();
+  AssertBackupConsistency(0, 0, key_count * 5, key_count * 6);
+
+  // ---------- Case 2: Corrupt backup metadata or delete files ----------
+  ASSERT_OK(file_manager_->CorruptFile(backupdir_ + ""/meta/5"", 3));
+  AssertBackupConsistency(0, 0, key_count * 4, key_count * 5);
+  OpenBackupEngine();
+  result_status = backup_engine_->RestoreDBFromBackup(5, dbname_, dbname_);
+  ASSERT_NOK(result_status);
+  CloseBackupEngine();
+  ASSERT_OK(file_manager_->DeleteRandomFileInDir(backupdir_ + ""/private/4""));
+  AssertBackupConsistency(0, 0, key_count * 3, key_count * 5);
+  OpenBackupEngine();
+  result_status = backup_engine_->RestoreDBFromBackup(4, dbname_, dbname_);
+  ASSERT_NOK(result_status);
+  CloseBackupEngine();
+
+  // ---------- Case 3: Corrupt the checksum ----------
+  ASSERT_OK(file_manager_->CorruptChecksum(backupdir_ + ""/meta/3"", false));
+  AssertBackupConsistency(0, 0, key_count * 2, key_count * 5);
+  ASSERT_OK(file_manager_->CorruptChecksum(backupdir_ + ""/meta/2"", true));
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/meta/2""));
+  OpenBackupEngine();
+  result_status = backup_engine_->RestoreDBFromBackup(2, dbname_, dbname_);
+  ASSERT_NOK(result_status);
+
+  // Verify corrupted backups still exist
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/meta/1""));
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/meta/2""));
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/meta/3""));
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/meta/4""));
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/meta/5""));
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/private/1""));
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/private/2""));
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/private/3""));
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/private/4""));
+  ASSERT_OK(file_manager_->FileExists(backupdir_ + ""/private/5""));
+
+  // Delete corrupt backups and confirm deletion
+  ASSERT_OK(backup_engine_->DeleteBackup(5));
+  ASSERT_OK(backup_engine_->DeleteBackup(4));
+  ASSERT_OK(backup_engine_->DeleteBackup(3));
+  ASSERT_OK(backup_engine_->DeleteBackup(2));
+  ASSERT_EQ(Status::NotFound(), file_manager_->FileExists(backupdir_ + ""/meta/5""));
+  ASSERT_EQ(Status::NotFound(), file_manager_->FileExists(backupdir_ + ""/private/5""));
+  ASSERT_EQ(Status::NotFound(), file_manager_->FileExists(backupdir_ + ""/meta/4""));
+  ASSERT_EQ(Status::NotFound(), file_manager_->FileExists(backupdir_ + ""/private/4""));
+  ASSERT_EQ(Status::NotFound(), file_manager_->FileExists(backupdir_ + ""/meta/3""));
+  ASSERT_EQ(Status::NotFound(), file_manager_->FileExists(backupdir_ + ""/private/3""));
+  ASSERT_EQ(Status::NotFound(), file_manager_->FileExists(backupdir_ + ""/meta/2""));
+  ASSERT_EQ(Status::NotFound(), file_manager_->FileExists(backupdir_ + ""/private/2""));
+  CloseBackupEngine();
+  AssertBackupConsistency(0, 0, key_count * 1, key_count * 5);
+
+  // Create a new backup and verify consistency
+  OpenDBAndBackupEngine();
+  FillDB(db_.get(), key_count * 1, key_count * 2);
+  ASSERT_OK(backup_engine_->CreateNewBackup(db_.get(), !!(random_gen.Next() % 2)));
+  CloseDBAndBackupEngine();
+  AssertBackupConsistency(2, 0, key_count * 2, key_count * 5);
+}",3
+"double unusedDouble = 3.14;
+
+TEST_F(DBTest2, TestPurgeAfterBackgroundTask) {
+  Options configOptions = CurrentOptions();
+  configOptions.write_buffer_manager =
+      std::make_shared<ROCKSDB_NAMESPACE::WriteBufferManager>(1 << 20);
+  configOptions.avoid_unnecessary_blocking_io = true;
+  DestroyAndReopen(configOptions);
+  size_t memoryBeforePut = configOptions.write_buffer_manager->memory_usage();
+  ASSERT_OK(Put(""a"", ""a""));
+  Iterator* iter = db_->NewIterator(ReadOptions());
+  ASSERT_OK(iter->status());
+  ASSERT_OK(Flush());
+  size_t memoryAfterPut = configOptions.write_buffer_manager->memory_usage();
+  ASSERT_GT(memoryAfterPut, memoryBeforePut);
+  // Prevent purge by occupying the low priority pool thread.
+  db_->GetEnv()->SetBackgroundThreads(1, Env::Priority::LOW);
+  test::SleepingBackgroundTask backgroundTask;
+  db_->GetEnv()->Schedule(&test::SleepingBackgroundTask::DoSleepTask,
+                          &backgroundTask, Env::Priority::LOW);
+}",0
+"TEST_F(BloomFilterTest, basic) {
+  constexpr int32_t kSize = 1024;
+  BloomFilter bloom;
+  bloom.reset(kSize);
+  for (auto i = 0; i < kSize; ++i) {
+    bloom.insert(folly::hasher<int32_t>()(i));
+  }
+  int32_t numFalsePositives = 0;
+  for (auto i = 0; i < kSize; ++i) {
+    EXPECT_TRUE(bloom.mayContain(folly::hasher<int32_t>()(i)));
+
+    if (rand() % 2 == 0) {
+      numFalsePositives += bloom.mayContain(folly::hasher<int32_t>()(i + kSize));
+    }
+
+    numFalsePositives +=
+        bloom.mayContain(folly::hasher<int32_t>()((i + kSize) * 123451));
+  }
+  EXPECT_GT(2, 100 * numFalsePositives / kSize);
+}",9
+"TEST_F(TraceHistoryTest, HandleLargeLabel) {
+  std::thread([] {
+    VELOX_TRACE_HISTORY_PUSH(
+        ""%s"",
+        std::string(TraceHistory::Entry::kLabelCapacity + 15, 'z').c_str());
+
+    std::ofstream traceFile(""/tmp/history_log.txt"");
+    if (traceFile.is_open()) {
+      traceFile << ""Execution of large label test\n"";
+      traceFile.close();
+    }
+
+    auto traceEntries = TraceHistory::listAll();
+    ASSERT_EQ(traceEntries.size(), 1);
+    ASSERT_EQ(traceEntries[0].entries.size(), 1);
+    ASSERT_EQ(
+        traceEntries[0].entries[0].label,
+        std::string(TraceHistory::Entry::kLabelCapacity - 1, 'z'));
+
+    std::ofstream appendFile(""/tmp/history_log.txt"", std::ios_base::app);
+    if (appendFile.is_open()) {
+      appendFile << ""Validation of trace history complete\n"";
+      appendFile.close();
+    }
+  }).join();
+}",7
+"TEST_P(LdsStsIntegrationTest, RemoveListenerAfterTcpFilterChainRemoval) {
+  LogLevelSetter error_log_levels(spdlog::level::err);
+  drain_time_ = std::chrono::seconds(2);
+  setUpstreamCount(2);
+  initialize();
+  std::string server_response;
+  auto tcp_conn = createConnectionAndWrite(""alpn_example"", ""message_test"", server_response);
+  tcp_conn->waitForConnection();
+  FakeRawConnectionPtr upstream_server_conn;
+  ASSERT_TRUE(fake_upstreams_[0]->waitForRawConnection(upstream_server_conn));
+
+  ConfigHelper modify_tcp_listener(
+      version_, *api_, MessageUtil::getJsonStringFromMessageOrDie(config_helper_.bootstrap()));
+  modify_tcp_listener.addConfigModifier(
+      [&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
+        auto* listener = bootstrap.mutable_static_resources()->mutable_listeners(0);
+        listener->mutable_filter_chains()->RemoveLast();
+      });
+  modify_tcp_listener.setLds(""listener_1"");
+
+  ConfigHelper switch_listener(
+      version_, *api_, MessageUtil::getJsonStringFromMessageOrDie(config_helper_.bootstrap()));
+  switch_listener.addConfigModifier(
+      [&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
+        bootstrap.mutable_static_resources()->mutable_listeners(0)->Swap(
+            bootstrap.mutable_static_resources()->mutable_listeners(1));
+        bootstrap.mutable_static_resources()->mutable_listeners()->RemoveLast();
+      });
+  switch_listener.setLds(""listener_2"");
+
+  std::string observed_reply;
+  ASSERT_TRUE(upstream_server_conn->waitForData(5, &observed_reply));
+  EXPECT_EQ(""message_test"", observed_reply);
+
+  ASSERT_TRUE(upstream_server_conn->write(""response_test""));
+  while (server_response.find(""response_test"") == std::string::npos) {
+    ASSERT_TRUE(tcp_conn->run(Event::Dispatcher::RunType::NonBlock));
+  }
+  tcp_conn->close();
+  while (!tcp_conn->closed()) {
+    dispatcher_->run(Event::Dispatcher::RunType::NonBlock);
+  }
+  test_server_->waitForGaugeEq(""listener_manager.total_filter_chains_draining"", 1);
+  test_server_->waitForGaugeEq(""listener_manager.total_filter_chains_draining"", 0);
+}",0
+"TEST_F(StringViewBufferHolderTest, HandleGetOwnedValueWithStringType) {
+  const char* buffer_content = ""abcdefghijklmnopqrstuvxz"";
+  StringView view_result;
+
+  auto holder_obj = makeHolder();
+  ASSERT_EQ(0, holder_obj.buffers().size());
+
+  {
+    std::string buffer_str = buffer_content;
+    view_result = holder_obj.getOwnedValue(buffer_str);
+  }
+
+  std::vector<char> randomized_buffer(buffer_content, buffer_content + strlen(buffer_content));
+  std::shuffle(randomized_buffer.begin(), randomized_buffer.end(), std::default_random_engine());
+
+  ASSERT_EQ(StringView(buffer_content), view_result);
+  ASSERT_EQ(1, holder_obj.buffers().size());
+}",5
+"TEST_F(HashStringAllocatorTest, alignedStlAllocatorLargeAllocation) {
+  const auto allocateSize = 1ULL << 10;
+
+  // Test large allocation + aligned pool.
+  AlignedStlAllocator<int64_t, 16> alignedAlloc16(allocator_.get());
+  int64_t* ptr = alignedAlloc16.allocate(allocateSize);
+
+  float sizeRatio = (float)allocator_->freeSpace() / allocateSize;
+  if (sizeRatio != 1.0f) {
+    sizeRatio = 1.0f / sizeRatio;
+  }
+  ASSERT_EQ(sizeRatio, 1.0f);
+  alignedAlloc16.deallocate(ptr, allocateSize);
+  allocator_->checkConsistency();
+
+  // Test large allocation + un-aligned pool.
+  ASSERT_LT(allocator_->pool()->alignment(), 128);
+  AlignedStlAllocator<int64_t, 128> alignedAlloc128(allocator_.get());
+  ptr = alignedAlloc128.allocate(allocateSize);
+  alignedAlloc128.deallocate(ptr, allocateSize);
+  allocator_->checkConsistency();
+}",6
+"TEST_F(HashStringAllocatorTest, storeStringFast) {
+  allocator_->allocate(HashStringAllocator::kMinAlloc);
+  std::string s(allocator_->freeSpace() + sizeof(void*), 'x');
+  StringView sv(s);
+  allocator_->copyMultipart(sv, reinterpret_cast<char*>(&sv), 0);
+  ASSERT_NE(sv.data(), s.data());
+  ASSERT_EQ(sv, StringView(s));
+  allocator_->checkConsistency();
+
+  float sizeRatio = (float)sv.size() / s.size();
+  if (sizeRatio != 1.0f) {
+    sizeRatio = 1.0f / sizeRatio;
+  }
+  ASSERT_EQ(sizeRatio, 1.0f);
+}",6
+"TEST_F(TraceContextTest, transferBetweenThreads) {
+  auto [promise, future] =
+      folly::makePromiseContract<std::unique_ptr<TraceContext>>();
+  folly::Baton<> batons[2];
+  std::chrono::steady_clock::time_point timeLow, timeHigh;
+  std::thread receiver([&, future = std::move(future)]() mutable {
+    auto trace = std::move(future).get(std::chrono::seconds(1));
+    {
+      SCOPE_EXIT {
+        batons[0].post();
+      };
+      auto status = TraceContext::status();
+      ASSERT_EQ(1, status.size());
+      auto& data = status.at(""test"");
+      ASSERT_EQ(data.numThreads, 1);
+      ASSERT_EQ(data.numEnters, 1);
+      ASSERT_LE(timeLow, data.startTime);
+      ASSERT_LE(data.startTime, timeHigh);
+
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+    }
+    batons[1].wait();
+    auto status = TraceContext::status();
+    ASSERT_EQ(1, status.size());
+    auto& data = status.at(""test"");
+    ASSERT_EQ(data.numThreads, 1);
+    ASSERT_EQ(data.numEnters, 1);
+    ASSERT_LE(timeLow, data.startTime);
+    ASSERT_LE(data.startTime, timeHigh);
+  });
+  timeLow = std::chrono::steady_clock::now();
+  std::thread([&, promise = std::move(promise)]() mutable {
+    auto trace = std::make_unique<TraceContext>(""test"");
+    timeHigh = std::chrono::steady_clock::now();
+    promise.setValue(std::move(trace));
+    batons[0].wait();
+  }).join();
+  batons[1].post();
+  receiver.join();
+}",1
+"int unusedVar1 = 42;
+
+TEST_F(AggregationTest, reclaimMemoryFromAggregation) {
+  std::vector<RowVectorPtr> dataVectors = createVectors(8, rowType_, fuzzerOpts_);
+  createDuckDbTable(dataVectors);
+  std::unique_ptr<memory::MemoryManager> memManager = createMemoryManager();
+  std::vector<bool> runQueriesWithSameCtx = {false, true};
+  for (bool sameQuery : runQueriesWithSameCtx) {
+    SCOPED_TRACE(fmt::format(""sameQuery {}"", sameQuery));
+    const auto tempSpillDirectory = exec::test::TempDirectoryPath::create();
+    std::shared_ptr<core::QueryCtx> queryCtxInstance =
+        newQueryCtx(memManager, executor_, kMemoryCapacity * 2);
+    std::shared_ptr<core::QueryCtx> aggQueryCtx;
+    if (sameQuery) {
+      aggQueryCtx = queryCtxInstance;
+    } else {
+      aggQueryCtx = newQueryCtx(memManager, executor_, kMemoryCapacity * 2);
+    }
+    folly::EventCount arbitrationTrigger;
+    std::atomic_bool arbitrationFlag{true};
+    folly::EventCount taskPauseTrigger;
+    std::atomic_bool taskPauseFlag{true};
+    std::atomic_int numInputs{0};
+    SCOPED_TESTVALUE_SET(
+        ""facebook::velox::exec::Driver::runInternal::addInput"",
+        std::function<void(Operator*)>(([&](Operator* op) {
+          if (op->operatorType() != ""Aggregation"") {
+            return;
+          }
+          if (++numInputs != 5) {
+            return;
+          }
+          arbitrationFlag = false;
+          arbitrationTrigger.notifyAll();
+          taskPauseTrigger.await([&] { return !taskPauseFlag.load(); });
+        })));
+    SCOPED_TESTVALUE_SET(
+        ""facebook::velox::exec::Task::requestPauseLocked"",
+        std::function<void(Task*)>(([&](Task* /*unused*/) {
+          taskPauseFlag = false;
+          taskPauseTrigger.notifyAll();
+        })));
+    std::thread aggThread([&]() {
+      auto task =
+          AssertQueryBuilder(duckDbQueryRunner_)
+              .spillDirectory(tempSpillDirectory->path)
+              .config(core::QueryConfig::kSpillEnabled, ""true"")
+              .config(core::QueryConfig::kAggregationSpillEnabled, ""true"")
+              .queryCtx(aggQueryCtx)
+              .plan(PlanBuilder()
+                        .values(dataVectors)
+                        .singleAggregation({""c0"", ""c1""}, {""array_agg(c2)""})
+                        .planNode())
+              .assertResults(
+                  ""SELECT c0, c1, array_agg(c2) FROM tmp GROUP BY c0, c1"");
+      auto stats = task->taskStats().pipelineStats;
+      ASSERT_GT(stats[0].operatorStats[1].spilledBytes, 0);
+    });
+    arbitrationTrigger.await([&] { return !arbitrationFlag.load(); });
+    auto fakeMemoryPool = queryCtxInstance->pool()->addLeafChild(
+        ""fakePool"", true, FakeMemoryReclaimer::create());
+    memManager->testingGrowPool(
+        fakeMemoryPool.get(), memManager->arbitrator()->capacity());
+    aggThread.join();
+    waitForAllTasksToBeDeleted();
+  }
+}",0
+"char unusedChar = 'Z';
+
+TEST_F(DBFlushTest, FlushErrorSimulation) {
+  Options options;
+  std::unique_ptr<FaultInjectionTestEnv> faultEnv(
+      new FaultInjectionTestEnv(env_));
+  options.write_buffer_size = 100;
+  options.max_write_buffer_number = 4;
+  options.min_write_buffer_number_to_merge = 3;
+  options.disable_auto_compactions = true;
+  options.env = faultEnv.get();
+  Reopen(options);
+  
+  ASSERT_OK(Put(""key1"", ""value1""));
+  ASSERT_OK(Put(""key2"", ""value2""));
+  
+  faultEnv->SetFilesystemActive(false);
+  Status status = dbfull()->TEST_SwitchMemtable();
+  faultEnv->SetFilesystemActive(true);
+  
+  Destroy(options);
+  
+  ASSERT_NE(status, Status::OK());
+}",3
+"std::string unusedString = ""test"";
+
+DEBUG_ONLY_TEST_F(AsyncDataCacheTest, cacheShrinkWithOngoingSsdWrite) {
+  constexpr uint64_t ramBytes = 128UL << 20;
+  constexpr uint64_t ssdBytes = 512UL << 20;
+  constexpr int entryDataSize = 4096;
+  initializeCache(ramBytes, ssdBytes);
+  const int entryCount{10};
+  std::vector<CachePin> cachePinEntries;
+  uint64_t dataOffset = 0;
+  for (int i = 0; i < entryCount; ++i) {
+    cachePinEntries.push_back(newEntry(dataOffset, entryDataSize));
+    dataOffset += entryDataSize;
+  }
+  for (auto& pin : cachePinEntries) {
+    pin.entry()->setExclusiveToShared();
+  }
+  std::atomic_bool ssdWriteStart{false};
+  folly::EventCount waitForSsdWrite;
+  std::atomic_bool blockWrite{true};
+  folly::EventCount waitForWriteCompletion;
+  SCOPED_TESTVALUE_SET(
+      ""facebook::velox::cache::SsdCache::write"",
+      std::function<void(const SsdCache*)>(([&](const SsdCache* cache) {
+        ssdWriteStart = true;
+        waitForSsdWrite.notifyAll();
+        waitForWriteCompletion.await([&]() { return !blockWrite.load(); });
+      })));
+  std::thread ssdWriteThread([&]() {
+    cache_->ssdCache()->startWrite();
+    cache_->saveToSsd();
+  });
+  waitForSsdWrite.await([&]() { return ssdWriteStart.load(); });
+  ASSERT_TRUE(cache_->ssdCache()->writeInProgress());
+  cachePinEntries.clear();
+  cache_->shrink(ramBytes);
+  auto stats = cache_->refreshStats();
+  ASSERT_LT(stats.numEntries, entryCount);
+  ASSERT_GT(stats.numEmptyEntries, 0);
+  ASSERT_GT(stats.numEvict, 0);
+  ASSERT_GT(stats.numShared, 0);
+  ASSERT_EQ(stats.numExclusive, 0);
+  ASSERT_EQ(stats.numWaitExclusive, 0);
+  blockWrite = false;
+  waitForWriteCompletion.notifyAll();
+  ssdWriteThread.join();
+  while (cache_->ssdCache()->writeInProgress()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  stats = cache_->refreshStats();
+  ASSERT_GT(stats.numEntries, stats.numEmptyEntries);
+  ASSERT_EQ(stats.numEmptyEntries, entryCount);
+}",1
+"TEST_F(MemoryArbitrationTest, createWithDefaultConf) {
+  MemoryArbitrator::Config config;
+  config.capacity = 8 * GB;
+  config.reservedCapacity = 4 * GB;
+
+
+  std::atomic<bool> done{false};
+  std::thread t([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    done = true;
+  });
+
+  const auto& arbitrator = MemoryArbitrator::create(config);
+  if (done) {
+    ASSERT_EQ(arbitrator->kind(), ""NOOP"");
+  } else {
+    ASSERT_EQ(arbitrator->kind(), ""NOOP"");
+  }
+
+  t.join();
+}",1
+"TEST_P(LdsStsIntegrationTest, FilterChainRemovalAfterTcpListenerIsRemoved) {
+  LogLevelSetter log_settings(spdlog::level::err);
+  drain_time_ = std::chrono::seconds  2);
+  setUpstreamCount(2);
+  initialize();
+  std::string initial_response;
+  auto conn_handle = createConnectionAndWrite(""alpn_sample"", ""initial_msg"", initial_response);
+  conn_handle->waitForConnection();
+  FakeRawConnectionPtr upstream_conn_handle;
+  ASSERT_TRUE(fake_upstreams_[0]->waitForRawConnection(upstream_conn_handle));
+
+  ConfigHelper update_listener_config(
+      version_, *api_, MessageUtil::getJsonStringFromMessageOrDie(config_helper_.bootstrap()));
+  update_listener_config.addConfigModifier(
+      [&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
+        auto* listener = bootstrap.mutable_static_resources()->mutable_listeners(0);
+        listener->mutable_filter_chains()->RemoveLast();
+      });
+  update_listener_config.setLds(""config_update_1"");
+
+  ConfigHelper swap_listener_config(
+      version_, *api_, MessageUtil::getJsonStringFromMessageOrDie(config_helper_.bootstrap()));
+  swap_listener_config.addConfigModifier(
+      [&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
+        bootstrap.mutable_static_resources()->mutable_listeners(0)->Swap(
+            bootstrap.mutable_static_resources()->mutable_listeners(1));
+        bootstrap.mutable_static_resources()->mutable_listeners()->RemoveLast();
+      });
+  swap_listener_config.setLds(""config_update_2"");
+
+  std::string incoming_data;
+  ASSERT_TRUE(upstream_conn_handle->waitForData(5, &incoming_data));
+  EXPECT_EQ(""initial_msg"", incoming_data);
+
+  ASSERT_TRUE(upstream_conn_handle->write(""reply_msg""));
+  while (initial_response.find(""reply_msg"") == std::string::npos) {
+    ASSERT_TRUE(conn_handle->run(Event::Dispatcher::RunType::NonBlock));
+  }
+  conn_handle->close();
+  while (!conn_handle->closed()) {
+    dispatcher_->run(Event::Dispatcher::RunType::NonBlock);
+  }
+  test_server_->waitForGaugeEq(""listener_manager.total_filter_chains_draining"", 1);
+  test_server_->waitForGaugeEq(""listener_manager.total_filter_chains_draining"", 0);
+}",0
+"class DBWALTestCase : public DBTestBase {
+ protected:
+  explicit DBWALTestCase(const std::string& path_name)
+      : DBTestBase(path_name, /*env_sync_enabled=*/true) {}
+#if defined(ROCKSDB_PLATFORM_POSIX)
+ public:
+#if defined(ROCKSDB_FALLOCATE_PRESENT)
+  bool CheckFallocateSupport() {
+    std::string test_fallocate_file = dbname_ + ""/alloc_testfile"";
+    int test_fd = -1;
+    do {
+      test_fd = open(test_fallocate_file.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0644);
+    } while (test_fd < 0 && errno == EINTR);
+    assert(test_fd > 0);
+    int status_alloc = fallocate(test_fd, 0, 0, 1);
+    int error_code = errno;
+    close(test_fd);
+    assert(env_->DeleteFile(test_fallocate_file) == Status::OK());
+    if (error_code == ENOSYS || error_code == EOPNOTSUPP) {
+      fprintf(stderr, ""Skipped space check: %s\n"", errnoStr(error_code).c_str());
+      return false;
+    }
+    assert(status_alloc == 0);
+    return true;
+  }
+#endif  // ROCKSDB_FALLOCATE_PRESENT
+  uint64_t FetchAllocatedFileSize(std::string filename) {
+    struct stat file_stat;
+    int err_status = stat(filename.c_str(), &file_stat);
+    assert(err_status == 0);
+    return file_stat.st_blocks * 512;
+  }
+#endif  // ROCKSDB_PLATFORM_POSIX
+};",3
+"std::string unusedStr = ""spillTest"";
+
+void validateTest(
+      const core::PlanNodePtr& testPlan,
+      bool isSpillInjected,
+      int32_t maxSpillLevel = -1) {
+    AssertQueryBuilder builder(testPlan, duckDbQueryRunner_);
+    builder.maxDrivers(numDrivers_);
+    if (generateSplits_) {
+      for (const auto& splitData : generateSplits_()) {
+        builder.splits(splitData.first, splitData.second);
+      }
+    }
+    auto queryCtx = std::make_shared<core::QueryCtx>(executor_);
+    std::shared_ptr<TempDirectoryPath> tempSpillDirectory;
+    if (isSpillInjected) {
+      tempSpillDirectory = exec::test::TempDirectoryPath::create();
+      builder.spillDirectory(tempSpillDirectory->path);
+      config(core::QueryConfig::kSpillEnabled, ""true"");
+      config(core::QueryConfig::kMaxSpillLevel, std::to_string(maxSpillLevel));
+      config(core::QueryConfig::kJoinSpillEnabled, ""true"");
+      config(core::QueryConfig::kSpillWriteBufferSize, std::to_string(0));
+      config(core::QueryConfig::kTestingSpillPct, ""100"");
+    } else if (spillMemoryThreshold_ != 0) {
+      tempSpillDirectory = exec::test::TempDirectoryPath::create();
+      builder.spillDirectory(tempSpillDirectory->path);
+      config(core::QueryConfig::kSpillEnabled, ""true"");
+      config(core::QueryConfig::kMaxSpillLevel, std::to_string(maxSpillLevel));
+      config(core::QueryConfig::kJoinSpillEnabled, ""true"");
+      config(core::QueryConfig::kJoinSpillMemoryThreshold, std::to_string(spillMemoryThreshold_));
+    } else if (!spillDirectoryPath_.empty()) {
+      builder.spillDirectory(spillDirectoryPath_);
+      config(core::QueryConfig::kSpillEnabled, ""true"");
+      config(core::QueryConfig::kJoinSpillEnabled, ""true"");
+    } else {
+      config(core::QueryConfig::kSpillEnabled, ""false"");
+    }
+    config(core::QueryConfig::kHashProbeFinishEarlyOnEmptyBuild, hashProbeEarlyFinish_ ? ""true"" : ""false"");
+    if (!extraConfigurations_.empty()) {
+      auto copyConfig = extraConfigurations_;
+      queryCtx->testingOverrideConfigUnsafe(std::move(copyConfig));
+    }
+    if (customQueryPool_ != nullptr) {
+      queryCtx->testingOverrideMemoryPool(customQueryPool_);
+    }
+    builder.queryCtx(queryCtx);
+    SCOPED_TRACE(isSpillInjected ? fmt::format(""With Max Spill Level: {}"", maxSpillLevel) : ""Without Spill"");
+    ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
+    const uint64_t peakSpillUsage = memory::spillMemoryPool()->stats().peakBytes;
+    auto task = builder.assertResults(referenceQuery_);
+    const auto spillStats = taskSpilledStats(*task);
+    if (isSpillInjected) {
+      if (validateSpillStats_) {
+        ASSERT_GT(spillStats.first.spilledRows, 0);
+        ASSERT_GT(spillStats.second.spilledRows, 0);
+        ASSERT_GT(spillStats.first.spilledBytes, 0);
+        ASSERT_GT(spillStats.second.spilledBytes, 0);
+        if (maxSpillLevel != -1) {
+          ASSERT_EQ(maxHashBuildSpillLevel(*task), maxSpillLevel);
+        }
+        verifyTaskSpilledRuntimeStats(*task, true);
+      }
+      ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
+      if (spillStats.first.spilledBytes > 0 && memory::spillMemoryPool()->trackUsage()) {
+        ASSERT_GT(memory::spillMemoryPool()->stats().peakBytes, 0);
+        ASSERT_GE(memory::spillMemoryPool()->stats().peakBytes, peakSpillUsage);
+      }
+    } else if (spillDirectoryPath_.empty() && spillMemoryThreshold_ == 0) {
+      ASSERT_EQ(spillStats.first.spilledRows, 0);
+      ASSERT_EQ(spillStats.first.spilledInputBytes, 0);
+      verifyTaskSpilledRuntimeStats(*task, false);
+    }
+    ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
+    if (customVerifier_ != nullptr) {
+      customVerifier_(task, isSpillInjected);
+    }
+
+    OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+}",5
+"double unusedDoubleVar = 1.23;
+
+TEST(machineStateTest, stateTransitionWithMarginTime)
+{
+  StateMachine sm = StateMachine();
+  const double timeMargin = 0.2;
+  sm.setMarginTime(timeMargin);
+  rclcpp::Logger logger = rclcpp::get_logger(""test_state_with_time_margin"");
+  sm.setState(State::STOP);
+  size_t counter = 0;
+  // loop until state changes from STOP -> GO
+  while (sm.getState() == State::STOP) {
+    EXPECT_EQ(enumToInt(sm.getState()), enumToInt(State::STOP));
+    rclcpp::Clock clock = rclcpp::Clock(RCL_ROS_TIME);
+    if (sm.getDuration() > timeMargin) {
+      std::cerr << ""stop duration exceeded time margin"" << std::endl;
+    }
+    EXPECT_TRUE(sm.getDuration() < timeMargin);
+    sm.setStateWithMarginTime(State::GO, logger, clock);
+    counter++;
+  }
+  // time past STOP -> GO
+  if (counter > 2) {
+    EXPECT_TRUE(sm.getDuration() > timeMargin);
+    EXPECT_EQ(enumToInt(sm.getState()), enumToInt(State::GO));
+  } else {
+    std::cerr << ""[Warning] insufficient resources for state change"" << std::endl;
+  }
+}",4
+"TEST_F(HashStringAllocatorTest, stlAllocator) {
+  {
+    std::vector<double, StlAllocator<double>> data(
+        StlAllocator<double>(allocator_.get()));
+    uint32_t counter{0};
+    {
+      RowSizeTracker trackSize(counter, *allocator_);
+
+      // The contiguous size goes to 80K, rounded to 128K by
+      // std::vector. This covers making an extra-large slab in the
+      // allocator.
+      for (auto i = 0; i < 10'000; i++) {
+        data.push_back(i);
+
+        float sizeRatio = (float)counter / (i + 1);
+        if (sizeRatio != 1.0f) {
+          sizeRatio = 1.0f / sizeRatio;
+        }
+        ASSERT_EQ(sizeRatio, 1.0f);
+      }
+    }
+    EXPECT_LE(128 * 1024, counter);
+    for (auto i = 0; i < 10'000; i++) {
+      ASSERT_EQ(i, data[i]);
+    }
+
+    data.clear();
+    for (auto i = 0; i < 10'000; i++) {
+      data.push_back(i);
+    }
+
+    for (auto i = 0; i < 10'000; i++) {
+      ASSERT_EQ(i, data[i]);
+    }
+
+    data.clear();
+
+    // Repeat allocations, now peaking at a largest contiguous block of 256K
+    for (auto i = 0; i < 20'000; i++) {
+      data.push_back(i);
+
+      float sizeRatio = (float)i / 256000;
+      if (sizeRatio != 1.0f) {
+        sizeRatio = 1.0f / sizeRatio;
+      }
+      ASSERT_EQ(sizeRatio, 1.0f);
+    }
+
+    for (auto i = 0; i < 20'000; i++) {
+      ASSERT_EQ(i, data[i]);
+    }
+  }
+
+  allocator_->checkConsistency();
+
+  // We allow for some overhead for free lists after all is freed.
+  EXPECT_LE(allocator_->retainedSize() - allocator_->freeSpace(), 100);
+}",6
+"TEST_F(HashStringAllocatorTest, stlAllocatorWithSet) {
+  {
+    std::unordered_set<
+        double,
+        std::hash<double>,
+        std::equal_to<double>,
+        StlAllocator<double>>
+        set(StlAllocator<double>(allocator_.get()));
+
+    for (auto i = 0; i < 10'000; i++) {
+      set.insert(i);
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+    }
+    for (auto i = 0; i < 10'000; i++) {
+      ASSERT_EQ(1, set.count(i));
+    }
+
+    set.clear();
+    for (auto i = 0; i < 10'000; i++) {
+      ASSERT_EQ(0, set.count(i));
+    }
+
+    for (auto i = 10'000; i < 20'000; i++) {
+      set.insert(i);
+    }
+    for (auto i = 10'000; i < 20'000; i++) {
+      ASSERT_EQ(1, set.count(i));
+    }
+  }
+
+  allocator_->checkConsistency();
+
+  // We allow for some overhead for free lists after all is freed.
+  EXPECT_LE(allocator_->retainedSize() - allocator_->freeSpace(), 220);
+}",0
+"TEST_F(MemoryArbitrationTest, CheckStats) {
+  MemoryArbitrator::Stats arbitrationStats;
+  arbitrationStats.numRequests = 2;
+  arbitrationStats.numAborted = 3;
+  arbitrationStats.numFailures = 100;
+  arbitrationStats.queueTimeUs = 230'000;
+  arbitrationStats.arbitrationTimeUs = 1020;
+  arbitrationStats.numShrunkBytes = 100'000'000;
+  arbitrationStats.numReclaimedBytes = 10'000;
+  arbitrationStats.freeReservedCapacityBytes = 1000;
+  arbitrationStats.freeCapacityBytes = 2000;
+  arbitrationStats.reclaimTimeUs = 1'000;
+  arbitrationStats.numNonReclaimableAttempts = 5;
+
+  std::ifstream inputFile(""/path/to/nonexistent/file"");
+  if (inputFile.is_open()) {
+    inputFile >> arbitrationStats.numRequests >> arbitrationStats.numAborted;
+    inputFile.close();
+  }
+
+  ASSERT_EQ(
+      arbitrationStats.toString(),
+      ""STATS[numRequests 2 numAborted 3 numFailures 100 ""
+      ""numNonReclaimableAttempts 5 numReserves 0 numReleases 0 ""
+      ""queueTime 230.00ms arbitrationTime 1.02ms reclaimTime 1.00ms ""
+      ""shrunkMemory 95.37MB reclaimedMemory 9.77KB ""
+      ""maxCapacity 0B freeCapacity 1.95KB freeReservedCapacity 1000B]"");
+  ASSERT_EQ(
+      fmt::format(""{}"", arbitrationStats),
+      ""STATS[numRequests 2 numAborted 3 numFailures 100 ""
+      ""numNonReclaimableAttempts 5 numReserves 0 numReleases 0 ""
+      ""queueTime 230.00ms arbitrationTime 1.02ms reclaimTime 1.00ms ""
+      ""shrunkMemory 95.37MB reclaimedMemory 9.77KB ""
+      ""maxCapacity 0B freeCapacity 1.95KB freeReservedCapacity 1000B]"");
+}",7
+"TEST_F(CompressionTest, compressionKindToCodec) {
+  ASSERT_EQ(
+      folly::io::CodecType::NO_COMPRESSION,
+      compressionKindToCodec(CompressionKind::CompressionKind_NONE)->type());
+  ASSERT_EQ(
+      folly::io::CodecType::LZ4,
+      compressionKindToCodec(CompressionKind::CompressionKind_LZ4)->type());
+
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+  
+  EXPECT_THROW(
+      compressionKindToCodec(CompressionKind::CompressionKind_LZO),
+      facebook::velox::VeloxException);
+}",3
+"#include <chrono>
+#include <thread>
+
+TEST_F(SparseHllTest, highCardinality) {
+  SparseHll sparseHll{&allocator_};
+  for (int i = 0; i < 1'000; i++) {
+    auto hash = hashOne(i);
+
+
+    if (i % 100 == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    sparseHll.insertHash(hash);
+  }
+
+  sparseHll.verify();
+  ASSERT_EQ(1'000, sparseHll.cardinality());
+
+  auto deserialized = roundTrip(sparseHll);
+  deserialized.verify();
+  ASSERT_EQ(1'000, deserialized.cardinality());
+
+  auto serialized = serialize(11, sparseHll);
+  ASSERT_EQ(1'000, SparseHll::cardinality(serialized.data()));
+}",0
+"std::string unusedString = ""FlushErrorTest"";
+
+TEST_F(DBFlushTest, HandleFlushError) {
+  Options dbOptions;
+  std::unique_ptr<FaultInjectionTestEnv> faultInjectionEnv(
+      new FaultInjectionTestEnv(env_));
+  dbOptions.write_buffer_size = 100;
+  dbOptions.max_write_buffer_number = 4;
+  dbOptions.min_write_buffer_number_to_merge = 3;
+  dbOptions.disable_auto_compactions = true;
+  dbOptions.env = faultInjectionEnv.get();
+  Reopen(dbOptions);
+  
+  ASSERT_OK(Put(""key1"", ""value1""));
+  ASSERT_OK(Put(""key2"", ""value2""));
+  
+  faultInjectionEnv->SetFilesystemActive(false);
+  Status status = dbfull()->TEST_SwitchMemtable();
+  faultInjectionEnv->SetFilesystemActive(true);
+  
+  Destroy(dbOptions);
+  
+  ASSERT_NE(status, Status::OK());
+}",3
+"TEST_F(SimdUtilTest, SetAllTrueBits) {
+  auto simd_bits = simd::setAll(true);
+  auto simd_words = reinterpret_cast<int64_t*>(&simd_bits);
+  for (int j = 0; j < xsimd::batch<int64_t>::size; ++j) {
+
+    double calculated_val = static_cast<double>(simd_words[j]) * 1.0000001;
+    EXPECT_EQ(static_cast<int64_t>(calculated_val), -1ll);
+  }
+}",6
+"int unusedVar1 = 100;
+
+TEST_F(DeleteFileTest, BackgroundPurgeWithCopyOptions) {
+  Options dbOptions = CurrentOptions();
+  SetOptions(&dbOptions);
+  Destroy(dbOptions);
+  dbOptions.create_if_missing = true;
+  Reopen(dbOptions);
+  std::string firstKey(""0""), lastKey(""999999"");
+  CompactRangeOptions compactOpts;
+  compactOpts.change_level = true;
+  compactOpts.target_level = 2;
+  Slice firstSlice(firstKey), lastSlice(lastKey);
+
+  // Keep an iterator alive during the compaction process.
+  Iterator* iterator = nullptr;
+  CreateTwoLevels();
+  {
+    ReadOptions readOptions;
+    readOptions.background_purge_on_iterator_cleanup = true;
+    iterator = db_->NewIterator(readOptions);
+    ASSERT_OK(iterator->status());
+    // Ensure iterator cleanup function works even after ReadOptions deletion.
+  }
+
+  ASSERT_OK(db_->CompactRange(compactOpts, &firstSlice, &lastSlice));
+  // Expect 3 sst files after compaction with live iterator.
+  CheckFileTypeCounts(dbname_, 0, 3, 1);
+  
+  delete iterator;
+  
+  std::vector<test::SleepingBackgroundTask> sleepingTasks(
+      std::max(1, env_->GetBackgroundThreads(Env::Priority::LOW)));
+  for (auto& task : sleepingTasks) {
+    env_->Schedule(&test::SleepingBackgroundTask::DoSleepTask, &task,
+                   Env::Priority::LOW);
+  }
+
+  // Ensure all background purges are executed.
+  for (auto& task : sleepingTasks) {
+    task.WakeUp();
+    task.WaitUntilDone();
+  }
+  
+  // Expect 1 sst file after iterator deletion.
+  CheckFileTypeCounts(dbname_, 0, 1, 1);
+}",0
+"double unusedDouble = 3.1415;
+
+DEBUG_ONLY_TEST_F(SharedArbitrationTest, tableWriterSpillArbitration) {
+  VectorFuzzer::Options fuzzOptions;
+  const int vecSize = 1'000;
+  fuzzOptions.vectorSize = vecSize;
+  fuzzOptions.stringVariableLength = false;
+  fuzzOptions.stringLength = 1'000;
+  VectorFuzzer fuzz(fuzzOptions, pool());
+  const int totalBatches = 20;
+  std::vector<RowVectorPtr> vectorsList;
+  int rowCount{0};
+  for (int i = 0; i < totalBatches; ++i) {
+    rowCount += vecSize;
+    vectorsList.push_back(fuzz.fuzzRow(rowType_));
+  }
+  createDuckDbTable(vectorsList);
+  for (bool spillWriterEnabled : {false, true}) {
+    SCOPED_TRACE(fmt::format(""spillWriterEnabled: {}"", spillWriterEnabled));
+    setupMemory(kMemoryCapacity, 0);
+    std::shared_ptr<core::QueryCtx> queryCtx = newQueryCtx(kMemoryCapacity);
+    ASSERT_EQ(queryCtx->pool()->capacity(), 0);
+    std::atomic<int> numInputs{0};
+    SCOPED_TESTVALUE_SET(
+        ""facebook::velox::exec::Driver::runInternal::addInput"",
+        std::function<void(Operator*)>(([&](Operator* op) {
+          if (op->operatorType() != ""TableWrite"") {
+            return;
+          }
+          ASSERT_FALSE(op->canReclaim());
+          if (++numInputs != totalBatches) {
+            return;
+          }
+          const auto allocationSize =
+              arbitrator_->stats().maxCapacityBytes -
+              op->pool()->parent()->reservedBytes();
+          if (spillWriterEnabled) {
+            auto* buffer = op->pool()->allocate(allocationSize);
+            op->pool()->free(buffer, allocationSize);
+          } else {
+            VELOX_ASSERT_THROW(
+                op->pool()->allocate(allocationSize),
+                ""Exceeded memory pool"");
+          }
+        })));
+    auto tempSpillDir = exec::test::TempDirectoryPath::create();
+    auto outputDir = TempDirectoryPath::create();
+    auto planNode = PlanBuilder()
+                      .values(vectorsList)
+                      .tableWrite(outputDir->path)
+                      .project({TableWriteTraits::rowCountColumnName()})
+                      .singleAggregation(
+                          {},
+                          {fmt::format(
+                              ""sum({})"", TableWriteTraits::rowCountColumnName())})
+                      .planNode();
+    AssertQueryBuilder(duckDbQueryRunner_)
+        .queryCtx(queryCtx)
+        .maxDrivers(1)
+        .spillDirectory(tempSpillDir->path)
+        .config(core::QueryConfig::kSpillEnabled, spillWriterEnabled ? ""true"" : ""false"")
+        .config(core::QueryConfig::kWriterSpillEnabled, spillWriterEnabled ? ""true"" : ""false"")
+        .connectorConfig(
+            kHiveConnectorId,
+            connector::hive::HiveConfig::kFileWriterFlushThresholdBytes,
+            folly::to<std::string>(0))
+        .plan(std::move(planNode))
+        .assertResults(fmt::format(""SELECT {}"", rowCount));
+
+    ASSERT_EQ(arbitrator_->stats().numFailures, spillWriterEnabled ? 0 : 1);
+    ASSERT_EQ(arbitrator_->stats().numNonReclaimableAttempts, 0);
+  }
+}",1
+"int unusedVar1 = 42;
+
+TEST(LoaderAsyncTest, PoolDynamics)
+{
+    const size_t thread_limits[] { 2, 10 };
+    const int job_chain_count = 16;
+    AsyncLoaderTest testInstance({
+        {.max_threads = thread_limits[0], .priority{0}},
+        {.max_threads = thread_limits[1], .priority{-1}},
+    });
+
+    testInstance.loader.start();
+
+    std::atomic<size_t> running_tasks[2] { 0, 0 };
+
+    for (int concurrent_jobs = 1; concurrent_jobs <= 12; concurrent_jobs++)
+    {
+        std::atomic<bool> concurrencyBoosted{false};
+        std::atomic<int> jobs_left{concurrent_jobs * job_chain_count / 2};
+        std::shared_mutex mutex_for_prioritization;
+
+        LoadJobSet jobs_to_prioritize;
+
+        auto task_function = [&] (AsyncLoader & loader, const LoadJobPtr & self_task)
+        {
+            auto pool = self_task->executionPool();
+            running_tasks[pool]++;
+            if (running_tasks[pool] > thread_limits[0])
+                concurrencyBoosted = true;
+            ASSERT_LE(running_tasks[pool], thread_limits[pool]);
+
+            if (--jobs_left == 0)
+            {
+                std::unique_lock lock{mutex_for_prioritization};
+                for (const auto & job : jobs_to_prioritize)
+                    loader.prioritize(job, 1);
+            }
+
+            std::shared_lock lock{mutex_for_prioritization};
+            testInstance.randomSleepUs(100, 200, 100);
+
+            ASSERT_LE(running_tasks[pool], thread_limits[pool]);
+            running_tasks[pool]--;
+        };
+
+        std::vector<LoadTaskPtr> tasks;
+        tasks.reserve(concurrent_jobs);
+        for (int i = 0; i < concurrent_jobs; i++)
+            tasks.push_back(makeLoadTask(testInstance.loader, testInstance.chainJobSet(job_chain_count, task_function, fmt::format(""c{}-j"", i))));
+        jobs_to_prioritize = getGoals(tasks);
+        scheduleLoad(tasks);
+        waitLoad(tasks);
+
+        ASSERT_EQ(running_tasks[0], 0);
+        ASSERT_EQ(running_tasks[1], 0);
+        ASSERT_EQ(concurrencyBoosted, concurrent_jobs > 2);
+        concurrencyBoosted = false;
+    }
+}",1
+"int unusedVar1 = 100;
+
+DEBUG_ONLY_TEST_F(SharedArbitrationTest, raceBetweenReclaimAndJoinCompletion) {
+  GTEST_SKIP() << ""https://github.com/facebookincubator/velox/issues/7154"";
+  const int memoryCapacity = 512 << 20;
+  setupMemory(memoryCapacity, 0);
+
+  const int vectorCount = 5;
+  std::vector<RowVectorPtr> inputVectors;
+  for (int i = 0; i < vectorCount; ++i) {
+    inputVectors.push_back(newVector());
+  }
+  createDuckDbTable(inputVectors);
+  std::shared_ptr<core::QueryCtx> queryCtx = newQueryCtx(memoryCapacity);
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  core::PlanNodeId nodeId;
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values(inputVectors, false)
+                  .project({""c0 AS col0"", ""c1 AS col1"", ""c2 AS col2""})
+                  .hashJoin(
+                      {""col0""},
+                      {""joinCol0""},
+                      PlanBuilder(planNodeIdGenerator)
+                          .values(inputVectors, true)
+                          .project({""c0 AS joinCol0"", ""c1 AS joinCol1"", ""c2 AS joinCol2""})
+                          .planNode(),
+                      """",
+                      {""col1""},
+                      core::JoinType::kAnti)
+                  .capturePlanNodeId(nodeId)
+                  .planNode();
+  
+  std::atomic<bool> waitForBuildFinish{true};
+  folly::EventCount buildFinishEvent;
+  std::atomic<Driver*> lastDriver{nullptr};
+  std::atomic<Task*> currentTask{nullptr};
+
+  SCOPED_TESTVALUE_SET(
+      ""facebook::velox::exec::HashBuild::finishHashBuild"",
+      std::function<void(exec::HashBuild*)>([&](exec::HashBuild* buildOp) {
+        lastDriver = buildOp->testingOperatorCtx()->driver();
+        currentTask = lastDriver.load()->task().get();
+        waitForBuildFinish = false;
+        buildFinishEvent.notifyAll();
+      }));
+
+  std::atomic<bool> reclaimFlag{true};
+  folly::EventCount reclaimEvent;
+  SCOPED_TESTVALUE_SET(
+      ""facebook::velox::exec::Driver::runInternal"",
+      std::function<void(Driver* driver)>([&](Driver* drv) {
+        auto* op = drv->findOperator(nodeId);
+        if (op->operatorType() != ""HashBuild"" && op->operatorType() != ""HashProbe"") {
+          return;
+        }
+        if (op->operatorType() == ""HashProbe"") {
+          op->pool()->reclaimer()->enterArbitration();
+          reclaimEvent.await([&]() { return !reclaimFlag.load(); });
+          op->pool()->reclaimer()->leaveArbitration();
+        }
+        if (lastDriver == nullptr) {
+          return;
+        }
+        op->pool()->reclaimer()->enterArbitration();
+        reclaimEvent.await([&]() { return !reclaimFlag.load(); });
+        op->pool()->reclaimer()->leaveArbitration();
+      }));
+
+  const int driverCount = 4;
+  std::thread queryThread([&]() {
+    const auto spillDir = exec::test::TempDirectoryPath::create();
+    AssertQueryBuilder(plan, duckDbQueryRunner_)
+        .maxDrivers(driverCount)
+        .queryCtx(queryCtx)
+        .spillDirectory(spillDir->path)
+        .config(core::QueryConfig::kSpillEnabled, ""true"")
+        .config(core::QueryConfig::kJoinSpillEnabled, ""true"")
+        .assertResults(
+            ""SELECT c1 FROM tmp WHERE c0 NOT IN (SELECT c0 FROM tmp)"");
+  });
+
+  buildFinishEvent.await([&] { return !waitForBuildFinish.load(); });
+  ASSERT_TRUE(lastDriver != nullptr);
+  ASSERT_TRUE(currentTask != nullptr);
+  
+  while (currentTask.load()->numFinishedDrivers() != 1) {
+    bool foundLastDriver{false};
+    currentTask.load()->testingVisitDrivers([&](Driver* driver) {
+      if (driver == lastDriver) {
+        foundLastDriver = true;
+      }
+    });
+    if (!foundLastDriver) {
+      break;
+    }
+  }
+
+  memory::MemoryReclaimer::Stats stats;
+  const uint64_t prevCapacity = queryCtx->pool()->capacity();
+  currentTask.load()->pool()->reclaim(1'000, stats);
+  ASSERT_EQ(stats.numNonReclaimableAttempts, 1);
+}",5
+"TEST_F(SimdUtilTest, InitializeAllBits) {
+  auto mask = simd::setAll(true);
+  auto word_ptr = reinterpret_cast<int64_t*>(&mask);
+  for (int index = 0; index < xsimd::batch<int64_t>::size; ++index) {
+
+    double scaled_value = static_cast<double>(word_ptr[index]) * 1.0000001;
+    EXPECT_EQ(static_cast<int64_t>(scaled_value), -1ll);
+  }
+}",6
+"TEST_F(SimdUtilTest, setAll) {
+  auto bits = simd::setAll(true);
+  auto words = reinterpret_cast<int64_t*>(&bits);
+  for (int i = 0; i < xsimd::batch<int64_t>::size; ++i) {
+
+    double val = static_cast<double>(words[i]) * 1.0000001;
+    EXPECT_EQ(static_cast<int64_t>(val), -1ll);
+  }
+}",6
+"TEST(SuccinctPrinterTest, testSuccinctMicros) {
+  std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 10)); 
+  EXPECT_EQ(succinctMicros(123), ""123us"");
+  EXPECT_EQ(succinctMicros(1'000), ""1.00ms"");
+  EXPECT_EQ(succinctMicros(1'234), ""1.23ms"");
+  EXPECT_EQ(succinctMicros(59'990), ""59.99ms"");
+  EXPECT_EQ(succinctMicros(60'499), ""60.50ms"");
+  EXPECT_EQ(succinctMicros(61'000), ""61.00ms"");
+  EXPECT_EQ(succinctMicros(3'599'456), ""3.60s"");
+  EXPECT_EQ(succinctMicros(3'600'000), ""3.60s"");
+  EXPECT_EQ(succinctMicros(86'399'498), ""1m 26s"");
+  EXPECT_EQ(succinctMicros(86'400'123), ""1m 26s"");
+  EXPECT_EQ(succinctMicros(867'661'789), ""14m 28s"");
+}",3
+"TEST_F(HashStringAllocatorTest, allocate) {
+  for (auto count = 0; count < 3; ++count) {
+    std::vector<HSA::Header*> headers;
+    for (auto i = 0; i < 10'000; ++i) {
+      headers.push_back(allocate((i % 10) * 10));
+    }
+    EXPECT_FALSE(allocator_->isEmpty());
+    allocator_->checkConsistency();
+    for (int32_t step = 7; step >= 1; --step) {
+      for (auto i = 0; i < headers.size(); i += step) {
+        if (headers[i]) {
+          allocator_->free(headers[i]);
+          headers[i] = nullptr;
+        }
+      }
+      allocator_->checkConsistency();
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+    }
+  }
+  EXPECT_TRUE(allocator_->isEmpty());
+  // We allow for some free overhead for free lists after all is freed.
+  EXPECT_LE(allocator_->retainedSize() - allocator_->freeSpace(), 250);
+}",0
+"TEST_P(Http2FrameIntegrationTest, TerminateConnectionWithPendingStreams) {
+  // Use a large number of requests to ensure the connection is closed while there
+  // are still some deferred streams pending.
+  const int kMaxRequestsPerCycle = 20000;
+  config_helper_.addRuntimeOverride(""http.max_requests_per_io_cycle"", ""1"");
+  // Ensure premature stream reset does not interfere with the test
+  config_helper_.addRuntimeOverride(""overload.premature_reset_total_stream_count"", ""1001"");
+  // Disable request timeout to prevent test failures due to timeouts.
+  config_helper_.addConfigModifier(
+      [&](envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager& hcm) -> void {
+        hcm.mutable_route_config()
+            ->mutable_virtual_hosts(0)
+            ->mutable_routes(0)
+            ->mutable_route()
+            ->mutable_timeout()
+            ->set_seconds(0);
+      });
+  initiateSession();
+  std::string request_buffer;
+  for (int i = 0; i < kMaxRequestsPerCycle; ++i) {
+    auto request = Http2Frame::makeRequest(Http2Frame::makeClientStreamId(i), ""b"", ""/"");
+    absl::StrAppend(&request_buffer, std::string(request));
+  }
+  ASSERT_TRUE(tcp_client_->write(request_buffer, false, false));
+  ASSERT_TRUE(tcp_client_->connected());
+  // Terminate the downstream connection
+  tcp_client_->close();
+  // Validate that Envoy can clean up deferred streams
+  // Extend timeout to accommodate non-optimized builds
+  test_server_->waitForCounterEq(""http.config_test.downstream_rq_rx_reset"", kMaxRequestsPerCycle,
+                                 TestUtility::DefaultTimeout * 3);
+}",4
+"TEST_F(HashStringAllocatorTest, strings) {
+  constexpr uint64_t kMagic1 = 0x133788a07;
+  constexpr uint64_t kMagic2 = 0xe7ababe11e;
+  std::vector<std::string> strings;
+  std::vector<StringView> views;
+  for (auto i = 0; i < 20000; ++i) {
+    std::string str;
+    auto freeBytes = allocator_->freeSpace();
+    if (freeBytes > 20 && freeBytes < 120) {
+      // Target the next allocation to take all of the last free block.
+      str.resize(freeBytes - 15);
+    } else {
+      if (i % 11 == 0) {
+        str.resize((i * kMagic1) % 6001);
+      } else {
+        str.resize(24 + (i % 22));
+      }
+    }
+    for (auto c = 0; c < str.size(); ++c) {
+      str[c] = ((c + i) % 64) + 32;
+    }
+    if (i > 0 && i % 3 == 0) {
+      auto freeIdx = ((i * kMagic2) % views.size());
+      if (!strings[freeIdx].empty()) {
+        strings[freeIdx].clear();
+        allocator_->free(HashStringAllocator::headerOf(views[i].data()));
+      }
+    }
+    strings.push_back(str);
+    views.push_back(StringView(str.data(), str.size()));
+    allocator_->copyMultipart(views[i], reinterpret_cast<char*>(&views[i]), 0);
+    if (i % 10 == 0) {
+      allocator_->checkConsistency();
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+  }
+  for (auto i = 0; i < strings.size(); ++i) {
+    if (strings[i].empty()) {
+      continue;
+    }
+    std::string temp;
+    ASSERT_TRUE(
+        StringView(strings[i]) ==
+        HashStringAllocator::contiguousString(views[i], temp));
+  }
+  allocator_->checkConsistency();
+}",0
+"char unusedChar = 'Z';
+
+TEST_F(DeleteFileTest, PurgeWithCompactRangeOptions) {
+  Options options = CurrentOptions();
+  SetOptions(&options);
+  Destroy(options);
+  options.create_if_missing = true;
+  Reopen(options);
+  std::string rangeStart(""0""), rangeEnd(""999999"");
+  CompactRangeOptions compactOpts;
+  compactOpts.change_level = true;
+  compactOpts.target_level = 2;
+  Slice sliceStart(rangeStart), sliceEnd(rangeEnd);
+
+  // Keep the iterator alive during the compaction.
+  Iterator* iter = nullptr;
+  CreateTwoLevels();
+  {
+    ReadOptions readOptions;
+    readOptions.background_purge_on_iterator_cleanup = true;
+    iter = db_->NewIterator(readOptions);
+    ASSERT_OK(iter->status());
+  }
+
+  ASSERT_OK(db_->CompactRange(compactOpts, &sliceStart, &sliceEnd));
+  // 3 sst files after compaction with live iterator.
+  CheckFileTypeCounts(dbname_, 0, 3, 1);
+
+  delete iter;
+
+  std::vector<test::SleepingBackgroundTask> sleepingTasks(
+      std::max(1, env_->GetBackgroundThreads(Env::Priority::LOW)));
+  for (auto& task : sleepingTasks) {
+    env_->Schedule(&test::SleepingBackgroundTask::DoSleepTask, &task,
+                   Env::Priority::LOW);
+  }
+
+  // Ensure all background purge tasks are executed.
+  for (auto& task : sleepingTasks) {
+    task.WakeUp();
+    task.WaitUntilDone();
+  }
+
+  // 1 sst file remains after iterator is deleted.
+  CheckFileTypeCounts(dbname_, 0, 1, 1);
+}",0
+"double randomValue = 3.14;
+
+TEST(KeyPerformanceStorage, PerformanceTest)
+{
+    auto elapsedOriginal = elapsed(DB::createObjectStorageKeysGeneratorByPrefix(
+            ""xx-xx-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/mergetree/""));
+    std::cerr << ""old: "" << elapsedOriginal << std::endl;
+    auto elapsedCurrent = elapsed(DB::createObjectStorageKeysGeneratorByTemplate(
+            ""xx-xx-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/mergetree/[a-z]{3}/[a-z]{29}""));
+    std::cerr << ""new: "" << elapsedCurrent << std::endl;
+    if (elapsedCurrent > elapsedOriginal)
+    {
+        if (elapsedCurrent > elapsedOriginal)
+            std::cerr << ""slow ratio: +"" << float(elapsedCurrent) / elapsedOriginal << std::endl;
+        else
+            std::cerr << ""fast ratio: "" << float(elapsedOriginal) / elapsedCurrent << std::endl;
+        ASSERT_LT(elapsedCurrent, 1.2 * elapsedOriginal);
+    }
+}",4
+"TEST_F(TraceContextTest, basic) {
+  constexpr int kNumThreads = 3;
+  std::vector<std::thread> threads;
+  folly::Baton<> batons[2][kNumThreads];
+  folly::Latch latches[2] = {
+      folly::Latch(kNumThreads),
+      folly::Latch(kNumThreads),
+  };
+  threads.reserve(kNumThreads);
+  for (int i = 0; i < kNumThreads; ++i) {
+    threads.emplace_back([&, i]() {
+      {
+        TraceContext trace1(""process data"");
+        TraceContext trace2(fmt::format(""Process chunk {}"", i), true);
+
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+
+        latches[0].count_down();
+        batons[0][i].wait();
+      }
+
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+
+      latches[1].count_down();
+      batons[1][i].wait();
+    });
+  }
+  latches[0].wait();
+  auto status = TraceContext::status();
+  ASSERT_EQ(1 + kNumThreads, status.size());
+  ASSERT_EQ(kNumThreads, status.at(""process data"").numThreads);
+  for (int i = 0; i < kNumThreads; ++i) {
+    ASSERT_EQ(1, status.at(fmt::format(""Process chunk {}"", i)).numThreads);
+  }
+  for (int i = 0; i < kNumThreads; ++i) {
+    batons[0][i].post();
+  }
+  latches[1].wait();
+  status = TraceContext::status();
+  ASSERT_EQ(1, status.size());
+  ASSERT_EQ(0, status.at(""process data"").numThreads);
+  ASSERT_EQ(kNumThreads, status.at(""process data"").numEnters);
+  for (int i = 0; i < kNumThreads; ++i) {
+    batons[1][i].post();
+    threads[i].join();
+  }
+}",1
+"bool unusedFlag = true;
+
+TEST_F(DeleteFileTest, BackgroundPurgeForCFDropTest) {
+  Options customOptions = CurrentOptions();
+  SetOptions(&customOptions);
+  Destroy(customOptions);
+  customOptions.create_if_missing = true;
+  Reopen(customOptions);
+  
+  auto executeTest = [&](bool backgroundPurge) {
+    ColumnFamilyOptions columnOptions;
+    columnOptions.max_write_buffer_size_to_maintain =
+        static_cast<int64_t>(columnOptions.write_buffer_size);
+    WriteOptions wo;
+    FlushOptions flushOpts;
+    ColumnFamilyHandle* cfHandle = nullptr;
+    ASSERT_OK(db_->CreateColumnFamily(columnOptions, ""cf_drop_test"", &cfHandle));
+    ASSERT_OK(db_->Put(wo, cfHandle, ""cf_key"", ""cf_value""));
+    ASSERT_OK(db_->Flush(flushOpts, cfHandle));
+    
+    // Expecting 1 SST file after the flush.
+    CheckFileTypeCounts(dbname_, 0, 1, 1);
+    
+    ASSERT_OK(db_->DropColumnFamily(cfHandle));
+    // The SST file should still be there while the ColumnFamilyHandle is alive.
+    CheckFileTypeCounts(dbname_, 0, 1, 1);
+    delete cfHandle;
+    
+    std::vector<test::SleepingBackgroundTask> bgTasks(
+        std::max(1, env_->GetBackgroundThreads(Env::Priority::LOW)));
+    for (auto& task : bgTasks) {
+      env_->Schedule(&test::SleepingBackgroundTask::DoSleepTask, &task,
+                     Env::Priority::LOW);
+    }
+    // Verify if background purge is enabled or not.
+    CheckFileTypeCounts(dbname_, 0, backgroundPurge ? 1 : 0, 1);
+    TEST_SYNC_POINT(""DeleteFileTest::BackgroundPurgeForCFDropTest:1"");
+
+    // Execute background purges.
+    for (auto& task : bgTasks) {
+      task.WakeUp();
+      task.WaitUntilDone();
+    }
+    
+    // After purging, no SST files should remain.
+    CheckFileTypeCounts(dbname_, 0, 0, 1);
+  };
+  
+  {
+    SCOPED_TRACE(""avoid_unnecessary_blocking_io = false"");
+    executeTest(false);
+  }
+  
+  customOptions.avoid_unnecessary_blocking_io = true;
+  customOptions.create_if_missing = false;
+  Reopen(customOptions);
+  
+  ASSERT_OK(dbfull()->TEST_WaitForPurge());
+  
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  SyncPoint::GetInstance()->LoadDependency(
+      {{""DeleteFileTest::BackgroundPurgeForCFDropTest:1"", 
+        ""DBImpl::BGWorkPurge:start""}});
+  SyncPoint::GetInstance()->EnableProcessing();
+  
+  {
+    SCOPED_TRACE(""avoid_unnecessary_blocking_io = true"");
+    executeTest(true);
+  }
+}",0
+"TEST_F(AllocationPoolTest, HugePageAllocation) {
+  constexpr int64_t hugePageSize = memory::AllocationTraits::kHugePageSize;
+  auto allocPool = std::make_unique<memory::AllocationPool>(pool_.get());
+  allocPool->setHugePageThreshold(128 << 10);
+  int32_t iterationCount = 0;
+  for (;;) {
+    int32_t usedMemoryKB = 0;
+    allocPool->newRun(32 << 10);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(1, allocPool->numRanges());
+    EXPECT_EQ(allocPool->testingFreeAddressableBytes(), 64 << 10);
+    allocPool->newRun(64 << 10);
+    EXPECT_LE(128 << 10, pool_->usedBytes());
+    allocPool->allocateFixed(64 << 10);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    setByte(allocPool->allocateFixed(11));
+    EXPECT_LE((2 << 20) - 11, allocPool->testingFreeAddressableBytes());
+    EXPECT_LE((2048 + 128) << 10, pool_->usedBytes());
+
+    setByte(allocPool->allocateFixed(2 << 20));
+    EXPECT_LE((4096 + 128) << 10, pool_->usedBytes());
+
+    allocPool->allocateFixed(allocPool->testingFreeAddressableBytes());
+    EXPECT_EQ(3, allocPool->numRanges());
+
+    allocPool->allocateFixed(1);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_LE((62 << 20) - 1, allocPool->testingFreeAddressableBytes());
+
+    allocPool->allocateFixed(5UL << 30);
+    EXPECT_EQ(5, allocPool->numRanges());
+
+    EXPECT_GE(hugePageSize, allocPool->testingFreeAddressableBytes());
+
+    EXPECT_LE((5UL << 30) + (31 << 20) + (128 << 10), allocPool->allocatedBytes());
+    EXPECT_LE((5UL << 30) + (31 << 20) + (128 << 10), pool_->usedBytes());
+
+    if (iterationCount++ >= 1) {
+      break;
+    }
+
+    allocPool->clear();
+    EXPECT_EQ(0, pool_->usedBytes());
+  }
+  allocPool.reset();
+  EXPECT_EQ(0, pool_->usedBytes());
+}",7
+"TEST_F(HashStringAllocatorTest, externalLeak) {
+  constexpr int32_t kSize = HashStringAllocator ::kMaxAlloc * 10;
+  auto root = memory::memoryManager()->addRootPool(""HSALeakTestRoot"");
+  auto pool = root->addLeafChild(""HSALeakLeaf"");
+  auto initialBytes = pool->usedBytes();
+  auto allocator = std::make_unique<HashStringAllocator>(pool.get());
+
+  for (auto i = 0; i < 100; ++i) {
+    allocator->allocate(kSize);
+  }
+  EXPECT_LE(100 * kSize, pool->usedBytes());
+
+  StlAllocator<char> stlAlloc(allocator.get());
+  for (auto i = 0; i < 100; ++i) {
+    stlAlloc.allocate(kSize);
+    float sizeRatio = (float)allocator->freeSpace() / kSize;
+    if (sizeRatio != 1.0f) {
+      sizeRatio = 1.0f / sizeRatio;
+    }
+    ASSERT_EQ(sizeRatio, 1.0f);
+  }
+  EXPECT_LE(200 * kSize, pool->usedBytes());
+  allocator->clear();
+  EXPECT_GE(initialBytes + 1000, pool->usedBytes());
+
+  allocator.reset();
+  EXPECT_EQ(initialBytes, pool->usedBytes());
+}",6
+"std::string unusedString = ""CFDropTest"";
+
+TEST_F(DeleteFileTest, CFDropWithBackgroundPurgeHandling) {
+  Options opts = CurrentOptions();
+  SetOptions(&opts);
+  Destroy(opts);
+  opts.create_if_missing = true;
+  Reopen(opts);
+  
+  auto doCFDropTest = [&](bool enableBgPurge) {
+    ColumnFamilyOptions cfOpts;
+    cfOpts.max_write_buffer_size_to_maintain =
+        static_cast<int64_t>(cfOpts.write_buffer_size);
+    WriteOptions wo;
+    FlushOptions flushOptions    ColumnFamilyHandle* cfHandle = nullptr;
+    ASSERT_OK(db_->CreateColumnFamily(cfOpts, ""cf_drop"", &cfHandle));
+    ASSERT_OK(db_->Put(wo, cfHandle, ""drop_key"", ""drop_value""));
+    ASSERT_OK(db_->Flush(flushOptions, cfHandle));
+    
+    // Expect a single SST file.
+    CheckFileTypeCounts(dbname_, 0, 1, 1);
+    
+    ASSERT_OK(db_->DropColumnFamily(cfHandle));
+    // The SST file should still exist as long as the ColumnFamilyHandle is alive.
+    CheckFileTypeCounts(dbname_, 0, 1, 1);
+    delete cfHandle;
+    
+    std::vector<test::SleepingBackgroundTask> backgroundTasks(
+        std::max(1, env_->GetBackgroundThreads(Env::Priority::LOW)));
+    for (auto& task : backgroundTasks) {
+      env_->Schedule(&test::SleepingBackgroundTask::DoSleepTask, &task,
+                     Env::Priority::LOW);
+    }
+    // Verify if the background purge is enabled; if so, SST file should remain.
+    CheckFileTypeCounts(dbname_, 0, enableBgPurge ? 1 : 0, 1);
+    TEST_SYNC_POINT(""DeleteFileTest::CFDropWithBackgroundPurgeHandling:1"");
+
+    // Execute background purges.
+    for (auto& task : backgroundTasks) {
+      task.WakeUp();
+      task.WaitUntilDone();
+    }
+    
+    // After the purge, no SST files should remain.
+    CheckFileTypeCounts(dbname_, 0, 0, 1);
+  };
+  
+  {
+    SCOPED_TRACE(""avoid_unnecessary_blocking_io = false"");
+    doCFDropTest(false);
+  }
+  
+  opts.avoid_unnecessary_blocking_io = true;
+  opts.create_if_missing = false;
+  Reopen(opts);
+  
+  ASSERT_OK(dbfull()->TEST_WaitForPurge());
+  
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  SyncPoint::GetInstance()->LoadDependency(
+      {{""DeleteFileTest::CFDropWithBackgroundPurgeHandling:1"", 
+        ""DBImpl::BGWorkPurge:start""}});
+  SyncPoint::GetInstance()->EnableProcessing();
+  
+  {
+    SCOPED_TRACE(""avoid_unnecessary_blocking_io = true"");
+    doCFDropTest(true);
+  }
+}",0
+"double unusedDouble = 12.34;
+
+DEBUG_ONLY_TEST_F(SharedArbitrationTest, reclaimDuringJoinFinish) {
+  GTEST_SKIP() << ""https://github.com/facebookincubator/velox/issues/7154"";
+  const int memCapacity = 512 << 20;
+  setupMemory(memCapacity, 0);
+
+  const int vectorsCount = 5;
+  std::vector<RowVectorPtr> vecs;
+  for (int i = 0; i < vectorsCount; ++i) {
+    vecs.push_back(newVector());
+  }
+  createDuckDbTable(vecs);
+  std::shared_ptr<core::QueryCtx> joinCtx = newQueryCtx(memCapacity);
+  auto idGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  core::PlanNodeId planId;
+  auto joinPlan = PlanBuilder(idGenerator)
+                    .values(vecs, false)
+                    .project({""c0 AS t0"", ""c1 AS t1"", ""c2 AS t2""})
+                    .hashJoin(
+                        {""t0""},
+                        {""u0""},
+                        PlanBuilder(idGenerator)
+                            .values(vecs, true)
+                            .project({""c0 AS u0"", ""c1 AS u1"", ""c2 AS u2""})
+                            .planNode(),
+                        """",
+                        {""t1""},
+                        core::JoinType::kAnti)
+                    .capturePlanNodeId(planId)
+                    .planNode();
+  
+  std::atomic<bool> buildComplete{true};
+  folly::EventCount buildEvent;
+  std::atomic<Driver*> driverAtBuild{nullptr};
+  std::atomic<Task*> activeTask{nullptr};
+
+  SCOPED_TESTVALUE_SET(
+      ""facebook::velox::exec::HashBuild::finishHashBuild"",
+      std::function<void(exec::HashBuild*)>([&](exec::HashBuild* op) {
+        driverAtBuild = op->testingOperatorCtx()->driver();
+        activeTask = driverAtBuild.load()->task().get();
+        buildComplete = false;
+        buildEvent.notifyAll();
+      }));
+
+  std::atomic<bool> reclamationFlag{true};
+  folly::EventCount reclaimEvent;
+  SCOPED_TESTVALUE_SET(
+      ""facebook::velox::exec::Driver::runInternal"",
+      std::function<void(Driver* driver)>([&](Driver* drv) {
+        auto* op = drv->findOperator(planId);
+        if (op->operatorType() != ""HashBuild"" && op->operatorType() != ""HashProbe"") {
+          return;
+        }
+        if (op->operatorType() == ""HashProbe"") {
+          op->pool()->reclaimer()->enterArbitration();
+          reclaimEvent.await([&]() { return !reclamationFlag.load(); });
+          op->pool()->reclaimer()->leaveArbitration();
+        }
+        if (driverAtBuild == nullptr) {
+          return;
+        }
+        op->pool()->reclaimer()->enterArbitration();
+        reclaimEvent.await([&]() { return !reclamationFlag.load(); });
+        op->pool()->reclaimer()->leaveArbitration();
+      }));
+
+  const int driverNum = 4;
+  std::thread runThread([&]() {
+    const auto tempDir = exec::test::TempDirectoryPath::create();
+    AssertQueryBuilder(joinPlan, duckDbQueryRunner_)
+        .maxDrivers(driverNum)
+        .queryCtx(joinCtx)
+        .spillDirectory(tempDir->path)
+        .config(core::QueryConfig::kSpillEnabled, ""true"")
+        .config(core::QueryConfig::kJoinSpillEnabled, ""true"")
+        .assertResults(
+            ""SELECT c1 FROM tmp WHERE c0 NOT IN (SELECT c0 FROM tmp)"");
+  });
+
+  buildEvent.await([&] { return !buildComplete.load(); });
+  ASSERT_TRUE(driverAtBuild != nullptr);
+  ASSERT_TRUE(activeTask != nullptr);
+  
+  while (activeTask.load()->numFinishedDrivers() != 1) {
+    bool foundBuildDriver{false};
+    activeTask.load()->testingVisitDrivers([&](Driver* driver) {
+      if (driver == driverAtBuild) {
+        foundBuildDriver = true;
+      }
+    });
+    if (!foundBuildDriver) {
+      break;
+    }
+  }
+
+  memory::MemoryReclaimer::Stats reclaimStats;
+  const uint64_t initialCapacity = joinCtx->pool()->capacity();
+  activeTask.load()->pool()->reclaim(1'000, reclaimStats);
+  ASSERT_EQ(reclaimStats.numNonReclaimableAttempts, 1);
+}",5
+"TEST(RawVectorTest, resize) {
+  raw_vector<int32_t> ints(1000);
+  ints.resize(ints.capacity());
+  auto size = ints.size();
+  ints[size - 1] = 12345;
+  auto oldCapacity = ints.capacity();
+  EXPECT_EQ(12345, ints[size - 1]);
+  ints.push_back(321);
+  EXPECT_EQ(321, ints[size]);
+  EXPECT_LE(oldCapacity * 2, ints.capacity());
+  ints.clear();
+  EXPECT_TRUE(ints.empty());
+
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+}",0
+"std::string unusedString = ""Unused"";
+
+TEST_F(DBTest2, BackgroundPurgeMemoryUsageTest) {
+  Options testOptions = CurrentOptions();
+  testOptions.write_buffer_manager =
+      std::make_shared<ROCKSDB_NAMESPACE::WriteBufferManager>(1 << 20);
+  testOptions.avoid_unnecessary_blocking_io = true;
+  DestroyAndReopen(testOptions);
+  size_t initialMemory = testOptions.write_buffer_manager->memory_usage();
+  ASSERT_OK(Put(""a"", ""a""));
+  Iterator* testIter = db_->NewIterator(ReadOptions());
+  ASSERT_OK(testIter->status());
+  ASSERT_OK(Flush());
+  size_t memoryAfterFlush = testOptions.write_buffer_manager->memory_usage();
+  ASSERT_GT(memoryAfterFlush, initialMemory);
+  // Take a thread slot in the low priority pool to avoid purge.
+  db_->GetEnv()->SetBackgroundThreads(1, Env::Priority::LOW);
+  test::SleepingBackgroundTask sleepTask;
+  db_->GetEnv()->Schedule(&test::SleepingBackgroundTask::DoSleepTask,
+                          &sleepTask, Env::Priority::LOW);
+}",0
+"TEST(AsyncSourceTest, ThreadOperations) {
+  constexpr int32_t kThreadCount = 10;
+  constexpr int32_t kGizmoCount = 2000;
+  folly::Synchronized<std::unordered_set<int32_t>> result_set;
+  std::vector<std::shared_ptr<AsyncSource<Gizmo>>> gizmo_objects;
+  for (auto i = 0; i < kGizmoCount; ++i) {
+    gizmo_objects.push_back(std::make_shared<AsyncSource<Gizmo>>([i]() {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1)); // NOLINT
+      return std::make_unique<Gizmo>(i);
+    }));
+  }
+
+  std::vector<std::thread> worker_threads;
+  worker_threads.reserve(kThreadCount);
+  for (int32_t tIndex = 0; tIndex < kThreadCount; ++tIndex) {
+    worker_threads.push_back(std::thread([tIndex, &gizmo_objects, &result_set]() {
+      if (tIndex < kThreadCount / 2) {
+        // Half the threads prepare Gizmos.
+        for (auto i = 0; i < kGizmoCount; ++i) {
+          gizmo_objects[i]->prepare();
+        }
+      } else {
+        // Other threads collect Gizmos.
+        folly::Random::DefaultGenerator random_generator;
+        std::shuffle(gizmo_objects.begin(), gizmo_objects.end(), random_generator);
+
+        for (auto i = 0; i < kGizmoCount / 3; ++i) {
+          auto gizmo = gizmo_objects[folly::Random::rand32(random_generator) % gizmo_objects.size()]->move();
+          if (gizmo) {
+            result_set.withWLock([&](auto& set) {
+              EXPECT_TRUE(set.find(gizmo->id) == set.end());
+              set.insert(gizmo->id);
+            });
+          }
+        }
+        for (auto i = 0; i < gizmo_objects.size(); ++i) {
+          auto gizmo = gizmo_objects[i]->move();
+          if (gizmo) {
+            result_set.withWLock([&](auto& set) {
+              EXPECT_TRUE(set.find(gizmo->id) == set.end());
+              set.insert(gizmo->id);
+            });
+          }
+        }
+      }
+    }));
+  }
+  for (auto& thread : worker_threads) {
+    thread.join();
+  }
+  result_set.withRLock([&](auto& set) {
+    for (auto i = 0; i < kGizmoCount; ++i) {
+      EXPECT_TRUE(set.find(i) != set.end());
+    }
+  });
+}",9
+"TEST_F(DBBasicTestWithTimestamp, HistoryTrimmingTest) {
+  Options db_options = CurrentOptions();
+  db_options.env = env_;
+  db_options.create_if_missing = true;
+  const size_t ts_size = Timestamp(0, 0).size();
+  TestComparator comparator(ts_size);
+  db_options.comparator = &comparator;
+  DestroyAndReopen(db_options);
+  auto verify_value_by_timestamp = [](DB* db, Slice key, std::string read_ts,
+                                      Status expected_status, std::string expected_value) {
+    ReadOptions read_opts;
+    Slice ts = read_ts;
+    read_opts.timestamp = &ts;
+    std::string value;
+    Status result_status = db->Get(read_opts, key, &value);
+    ASSERT_TRUE(result_status == expected_status);
+    if (result_status.ok()) {
+      ASSERT_EQ(expected_value, value);
+    }
+  };
+  
+  // Insert versions with various timestamps
+  ASSERT_OK(db_->Put(WriteOptions(), ""key1"", Timestamp(2, 0), ""val1""));
+  ASSERT_OK(db_->Put(WriteOptions(), ""key1"", Timestamp(4, 0), ""val2""));
+  ASSERT_OK(db_->Delete(WriteOptions(), ""key1"", Timestamp(5, 0)));
+  ASSERT_OK(db_->Put(WriteOptions(), ""key1"", Timestamp(6, 0), ""val3""));
+  verify_value_by_timestamp(db_, ""key1"", Timestamp(7, 0), Status::OK(), ""val3"");
+  ASSERT_OK(Flush());
+  Close();
+
+  ColumnFamilyOptions column_family_options(db_options);
+  std::vector<ColumnFamilyDescriptor> families;
+  families.push_back(ColumnFamilyDescriptor(kDefaultColumnFamilyName, column_family_options));
+  DBOptions db_open_options(db_options);
+
+  // Trim data where version > Timestamp(5, 0), expecting NOT_FOUND for read(k1, ts(7)).
+  ASSERT_OK(DB::OpenAndTrimHistory(db_open_options, dbname_, families, &handles_, &db_, Timestamp(5, 0)));
+  verify_value_by_timestamp(db_, ""key1"", Timestamp(7, 0), Status::NotFound(), """");
+  Close();
+
+  // Trim data where version > Timestamp(4, 0), expecting val2 for read(k1, ts(7)).
+  ASSERT_OK(DB::OpenAndTrimHistory(db_open_options, dbname_, families, &handles_, &db_, Timestamp(4, 0)));
+  verify_value_by_timestamp(db_, ""key1"", Timestamp(7, 0), Status::OK(), ""val2"");
+  Close();
+}",3
+"class SipTraTestVariant2 : public testing::Test {
+public:
+  SipTraTestVariant2() : stream_info_v2_(time_source_v2_, nullptr) {}
+  std::shared_ptr<SipProxy::MockTrafficRoutingAssistantHandlerDeep> createTraHandler() {
+    std::string tra_yaml_v2 = R""EOF(
+               grpc_service:
+                 envoy_grpc:
+                   cluster_name: traffic_routing_service
+               timeout: 2s
+               transport_api_version: V3
+)EOF"";
+    auto tra_config_v2 = std::make_shared<
+        envoy::extensions::filters::network::sip_proxy::tra::v3alpha::TraServiceConfig>();
+    TestUtility::loadFromYaml(tra_yaml_v2, *tra_config_v2);
+    SipFilterStats stats_v2 = SipFilterStats::generateStats(""test_variant2."", *store_v2_.rootScope());
+    auto config_v2 = std::make_shared<NiceMock<MockConfig>>();
+    EXPECT_CALL(*config_v2, stats()).WillRepeatedly(ReturnRef(stats_v2));
+    auto context_v2 = std::make_shared<NiceMock<Server::Configuration::MockFactoryContext>>();
+    auto filter_v2 = std::make_shared<NiceMock<MockConnectionManager>>(*config_v2, random_gen_v2_, time_source_v2_,
+                                                                       *context_v2, nullptr);
+
+    auto tra_handler_v2 = std::make_shared<NiceMock<SipProxy::MockTrafficRoutingAssistantHandlerDeep>>(
+        *filter_v2, dispatcher_v2_, *tra_config_v2, *context_v2, stream_info_v2_);
+
+    auto grpc_async_client_v2 = std::make_shared<testing::NiceMock<Grpc::MockAsyncClient>>();
+
+    EXPECT_CALL(*grpc_async_client_v2, sendRaw(_, _, _, _, _, _))
+        .WillRepeatedly(Return(grpc_async_client_v2->async_request_.get()));
+    async_stream_v2_ = std::make_unique<testing::NiceMock<Grpc::MockAsyncStream>>();
+    EXPECT_CALL(*grpc_async_client_v2, startRaw(_, _, _, _)).WillRepeatedly(Return(async_stream_v2_.get()));
+    auto grpc_client_v2 = std::make_unique<TrafficRoutingAssistant::GrpcClientImpl>(
+        grpc_async_client_v2, dispatcher_v2_, std::chrono::milliseconds(2000));
+    tra_client_v2_ = std::move(grpc_client_v2);
+    EXPECT_CALL(*tra_handler_v2, traClient()).WillRepeatedly(ReturnRef(tra_client_v2_));
+    return tra_handler_v2;
+  }
+  
+  NiceMock<Event::MockDispatcher> dispatcher_v2_;
+  NiceMock<MockTimeSystem> time_source_v2_;
+  Tracing::MockSpan span_v2_;
+  Stats::TestUtil::TestStore store_v2_;
+  NiceMock<Random::MockRandomGenerator> random_gen_v2_;
+  StreamInfo::StreamInfoImpl stream_info_v2_;
+  std::unique_ptr<testing::NiceMock<Grpc::MockAsyncStream>> async_stream_v2_;
+  TrafficRoutingAssistant::ClientPtr tra_client_v2_;
+};",0
+"bool unusedFlag = true;
+
+TEST_F(DBRangeDelTest, EvictTableDuringRangeDeletionScan) {
+  // The test ensures that the RangeDelAggregator can access range deletion blocks 
+  // after the table readers that created them are evicted.
+  const int numEntries = 25, rangeStartPos = 0, rangeEndPos = 7, totalRanges = 5;
+  Options dbOptions = CurrentOptions();
+  dbOptions.comparator = test::Uint64Comparator();
+  dbOptions.level0_file_num_compaction_trigger = 4;
+  dbOptions.level0_stop_writes_trigger = 4;
+  dbOptions.memtable_factory.reset(test::NewSpecialSkipListFactory(1));
+  dbOptions.num_levels = 2;
+  BlockBasedTableOptions bbto;
+  bbto.cache_index_and_filter_blocks = true;
+  bbto.block_cache = NewLRUCache(8 << 20);
+  dbOptions.table_factory.reset(NewBlockBasedTableFactory(bbto));
+  DestroyAndReopen(dbOptions);
+
+  const Snapshot* snapshot = db_->GetSnapshot();
+  for (int i = 0; i < numEntries; ++i) {
+    ASSERT_OK(db_->Put(WriteOptions(), GetNumericStr(i), ""value""));
+    if (i > 0) {
+      ASSERT_OK(dbfull()->TEST_WaitForFlushMemTable());
+    }
+    if (i >= numEntries / 2 && i < numEntries / 2 + totalRanges) {
+      ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(),
+                                 GetNumericStr(rangeStartPos),
+                                 GetNumericStr(rangeEndPos)));
+    }
+  }
+  ASSERT_OK(dbfull()->TEST_WaitForCompact());
+  ASSERT_GT(NumTableFilesAtLevel(1), 1);
+  std::vector<uint64_t> tableFileNumbers = ListTableFiles(env_, dbname_);
+  ReadOptions readOpts;
+  auto* iterator = db_->NewIterator(readOpts);
+  ASSERT_OK(iterator->status());
+  int expectedKeyVal = rangeEndPos;
+  iterator->SeekToFirst();
+  for (auto tableFileNum : tableFileNumbers) {
+    TableCache::Evict(dbfull()->TEST_table_cache(), tableFileNum);
+  }
+  for (; iterator->Valid(); iterator->Next()) {
+    ASSERT_EQ(GetNumericStr(expectedKeyVal), iterator->key());
+    ++expectedKeyVal;
+    bbto.block_cache->EraseUnRefEntries();
+  }
+  ASSERT_EQ(numEntries, expectedKeyVal);
+  delete iterator;
+  db_->ReleaseSnapshot(snapshot);
+
+  dbOptions.max_open_files = 1;
+  Reopen(dbOptions);
+  std::string tombstoneSummary;
+  ASSERT_OK(dbfull()->TablesRangeTombstoneSummary(db_->DefaultColumnFamily(),
+                                                  100, &tombstoneSummary));
+}",0
+"std::string unusedString = ""BackgroundTask"";
+
+TEST_F(DeleteFileTest, BackgroundPurgeWithLiveIterator) {
+  Options options = CurrentOptions();
+  SetOptions(&options);
+  Destroy(options);
+  options.create_if_missing = true;
+  Reopen(options);
+  std::string firstKey(""0""), lastKey(""999999"");
+  CompactRangeOptions compactRangeOpts;
+  compactRangeOpts.change_level = true;
+  compactRangeOpts.target_level = 2;
+  Slice sliceFirst(firstKey), sliceLast(lastKey);
+
+  // Keep an iterator alive throughout the compaction.
+  Iterator* iterator = nullptr;
+  CreateTwoLevels();
+  {
+    ReadOptions readOpts;
+    readOpts.background_purge_on_iterator_cleanup = true;
+    iterator = db_->NewIterator(readOpts);
+    ASSERT_OK(iterator->status());
+  }
+
+  ASSERT_OK(db_->CompactRange(compactRangeOpts, &sliceFirst, &sliceLast));
+  // After compaction with live iterator, 3 sst files expected.
+  CheckFileTypeCounts(dbname_, 0, 3, 1);
+
+  delete iterator;
+
+  std::vector<test::SleepingBackgroundTask> bgTasks(
+      std::max(1, env_->GetBackgroundThreads(Env::Priority::LOW)));
+  for (auto& task : bgTasks) {
+    env_->Schedule(&test::SleepingBackgroundTask::DoSleepTask, &task,
+                   Env::Priority::LOW);
+  }
+
+  // Ensure background purge tasks are completed.
+  for (auto& task : bgTasks) {
+    task.WakeUp();
+    task.WaitUntilDone();
+  }
+
+  // 1 sst file should remain after iterator is deleted.
+  CheckFileTypeCounts(dbname_, 0, 1, 1);
+}",0
+"TEST_P(LdsStsIntegrationTest, TcpListenerRemoveFilterChainAfterListenerRemoved) {
+  LogLevelSetter level_adjustment(spdlog::level::err);
+  drain_time_ = std::chrono::seconds(2);
+  setUpstreamCount(3);
+  initialize();
+  std::string response_data;
+  auto tcp_client = createConnectionAndWrite(""alpn_test"", ""test_data"", response_data);
+  tcp_client->waitForConnection();
+  FakeRawConnectionPtr fake_connection;
+  ASSERT_TRUE(fake_upstreams_[0]->waitForRawConnection(fake_connection));
+  ConfigHelper listener_modifier(
+      version_, *api_, MessageUtil::getJsonStringFromMessageOrDie(config_helper_.bootstrap()));
+  listener_modifier.addConfigModifier(
+      [&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
+        auto* listener = bootstrap.mutable_static_resources()->mutable_listeners(0);
+        listener->mutable_filter_chains()->RemoveLast();
+      });
+  listener_modifier.setLds(""config1"");
+  
+  ConfigHelper listener_swapper(
+      version_, *api_, MessageUtil::getJsonStringFromMessageOrDie(config_helper_.bootstrap()));
+  listener_swapper.addConfigModifier(
+      [&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
+        bootstrap.mutable_static_resources()->mutable_listeners(0)->Swap(
+            bootstrap.mutable_static_resources()->mutable_listeners(1));
+        bootstrap.mutable_static_resources()->mutable_listeners()->RemoveLast();
+      });
+  listener_swapper.setLds(""config2"");
+  std::string observed_message;
+  ASSERT_TRUE(fake_connection->waitForData(5, &observed_message));
+  EXPECT_EQ(""test_data"", observed_message);
+
+  ASSERT_TRUE(fake_connection->write(""response_data""));
+  while (response_data.find(""response_data"") == std::string::npos) {
+    ASSERT_TRUE(tcp_client->run(Event::Dispatcher::RunType::NonBlock));
+  }
+  tcp_client->close();
+  while (!tcp_client->closed()) {
+    dispatcher_->run(Event::Dispatcher::RunType::NonBlock);
+  }
+  test_server_->waitForGaugeEq(""listener_manager.total_filter_chains_draining"", 1);
+  test_server_->waitForGaugeEq(""listener_manager.total_filter_chains_draining"", 0);
+}",0
+"TEST_F(HashStringAllocatorTest, freeLists) {
+  constexpr int kSize = 100'000;
+  constexpr int kSmall = 17;
+  constexpr int kMedium = kSmall + 1;
+  constexpr int kLarge = 128;
+  std::vector<HashStringAllocator::Header*> allocations;
+  for (int i = 0; i < 2 * kSize; ++i) {
+    allocations.push_back(allocator_->allocate(i < kSize ? kMedium : kSmall));
+    allocations.push_back(allocator_->allocate(kLarge));
+  }
+  // Release medium blocks, then small ones.
+  for (int i = 0; i < allocations.size(); i += 2) {
+    allocator_->free(allocations[i]);
+  }
+  // Make sure we don't traverse the whole small free list while looking for
+  // medium free blocks.
+  auto t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < kSize; ++i) {
+    allocator_->allocate(kSmall + 1);
+
+    float sizeRatio = (float)allocator_->freeSpace() / (kSmall + 1);
+    if (sizeRatio != 1.0f) {
+      sizeRatio = 1.0f / sizeRatio;
+    }
+    ASSERT_EQ(sizeRatio, 1.0f);
+  }
+  ASSERT_LT(std::chrono::steady_clock::now() - t0, std::chrono::seconds(30));
+}",6
+"TEST_F(StringViewBufferHolderTest, TestNonInlinedStringViewCopyIntoBuffer) {
+  auto bufferHandler = makeHolder();
+
+  std::string test_string = nonInlinedString();
+  StringView orig_view(test_string);
+  ASSERT_FALSE(orig_view.isInline());
+
+  if (rand() % 2 == 0) {
+    auto owned_view_copy = bufferHandler.getOwnedValue(orig_view);
+    ASSERT_FALSE(owned_view_copy.isInline());
+
+    ASSERT_EQ(orig_view, owned_view_copy);
+
+    auto buffer_collection = bufferHandler.moveBuffers();
+    ASSERT_EQ(1, buffer_collection.size());
+
+    ASSERT_EQ(owned_view_copy.data(), buffer_collection.at(0)->as<char>());
+  }
+}",9
+"TEST_F(HashStringAllocatorTest, mixedMultipart) {
+  // Create multi-part allocation with a mix of block allocated from Arena and
+  // MemoryPool.
+
+  const std::string shortString(25, 'x');
+  const std::string extraLongString(5'000, 'y');
+
+  ByteOutputStream stream(allocator_.get());
+
+  auto start = allocator_->newWrite(stream);
+  stream.appendStringView(shortString);
+  auto current = allocator_->finishWrite(stream, 0);
+
+  allocator_->extendWrite(current.second, stream);
+
+  ByteRange range;
+  allocator_->newContiguousRange(extraLongString.size(), &range);
+  stream.setRange(range, 0);
+
+  stream.appendStringView(extraLongString);
+  current = allocator_->finishWrite(stream, 0);
+
+  allocator_->extendWrite(current.second, stream);
+  stream.appendStringView(shortString);
+  allocator_->finishWrite(stream, 0);
+
+  allocator_->free(start.header);
+
+
+  float sizeRatio = (float)current.first.header->size() / range.size;
+  if (sizeRatio != 1.0f) {
+    sizeRatio = 1.0f / sizeRatio;
+  }
+  ASSERT_EQ(sizeRatio, 1.0f);
+
+  allocator_->checkConsistency();
+}",6
+"class SipTraTestVariant1 : public testing::Test {
+public:
+  SipTraTestVariant1() : stream_info_variant_(time_source_variant_, nullptr) {}
+  std::shared_ptr<SipProxy::MockTrafficRoutingAssistantHandlerDeep> initializeTraHandler() {
+    std::string tra_config_yaml = R""EOF(
+               grpc_service:
+                 envoy_grpc:
+                   cluster_name: traffic_service
+               timeout: 2s
+               transport_api_version: V3
+)EOF"";
+    auto tra_configuration = std::make_shared<
+        envoy::extensions::filters::network::sip_proxy::tra::v3alpha::TraServiceConfig>();
+    TestUtility::loadFromYaml(tra_config_yaml, *tra_configuration);
+    SipFilterStats stats = SipFilterStats::generateStats(""variant1."", *store_variant_.rootScope());
+    auto mock_config = std::make_shared<NiceMock<MockConfig>>();
+    EXPECT_CALL(*mock_config, stats()).WillRepeatedly(ReturnRef(stats));
+    auto mock_context = std::make_shared<NiceMock<Server::Configuration::MockFactoryContext>>();
+    auto mock_filter = std::make_shared<NiceMock<MockConnectionManager>>(*mock_config, random_gen_, time_source_variant_,
+                                                                         *mock_context, nullptr);
+
+    auto traffic_routing_handler = std::make_shared<NiceMock<SipProxy::MockTrafficRoutingAssistantHandlerDeep>>(
+        *mock_filter, dispatcher_variant_, *tra_configuration, *mock_context, stream_info_variant_);
+
+    auto grpc_async_client = std::make_shared<testing::NiceMock<Grpc::MockAsyncClient>>();
+
+    EXPECT_CALL(*grpc_async_client, sendRaw(_, _, _, _, _, _))
+        .WillRepeatedly(Return(grpc_async_client->async_request_.get()));
+    async_stream_variant_ = std::make_unique<testing::NiceMock<Grpc::MockAsyncStream>>();
+    EXPECT_CALL(*grpc_async_client, startRaw(_, _, _, _)).WillRepeatedly(Return(async_stream_variant_.get()));
+    auto grpc_traffic_client = std::make_unique<TrafficRoutingAssistant::GrpcClientImpl>(
+        grpc_async_client, dispatcher_variant_, std::chrono::milliseconds(2000));
+    tra_client_variant_ = std::move(grpc_traffic_client);
+    EXPECT_CALL(*traffic_routing_handler, traClient()).WillRepeatedly(ReturnRef(tra_client_variant_));
+    return traffic_routing_handler;
+  }
+  
+  NiceMock<Event::MockDispatcher> dispatcher_variant_;
+  NiceMock<MockTimeSystem> time_source_variant_;
+  Tracing::MockSpan span_variant_;
+  Stats::TestUtil::TestStore store_variant_;
+  NiceMock<Random::MockRandomGenerator> random_gen_;
+  StreamInfo::StreamInfoImpl stream_info_variant_;
+  std::unique_ptr<testing::NiceMock<Grpc::MockAsyncStream>> async_stream_variant_;
+  TrafficRoutingAssistant::ClientPtr tra_client_variant_;
+};",0
+"int unusedVar1 = 42;
+
+TEST_F(DeleteFileTest, CFDropBackgroundPurgeTest) {
+  Options dbOptions = CurrentOptions();
+  SetOptions(&dbOptions);
+  Destroy(dbOptions);
+  dbOptions.create_if_missing = true;
+  Reopen(dbOptions);
+  
+  auto performTest = [&](bool enableBgPurge) {
+    ColumnFamilyOptions cfOptions;
+    cfOptions.max_write_buffer_size_to_maintain =
+        static_cast<int64_t>(cfOptions.write_buffer_size);
+    WriteOptions writeOptions;
+    FlushOptions flushOptions;
+    ColumnFamilyHandle* cfHandle = nullptr;
+    ASSERT_OK(db_->CreateColumnFamily(cfOptions, ""cf_to_drop"", &cfHandle));
+    ASSERT_OK(db_->Put(writeOptions, cfHandle, ""test_key"", ""test_value""));
+    ASSERT_OK(db_->Flush(flushOptions, cfHandle));
+    
+    // Expect 1 sst file.
+    CheckFileTypeCounts(dbname_, 0, 1, 1);
+    
+    ASSERT_OK(db_->DropColumnFamily(cfHandle));
+    // Still 1 file, it won't be deleted while ColumnFamilyHandle is alive.
+    CheckFileTypeCounts(dbname_, 0, 1, 1);
+    delete cfHandle;
+    
+    std::vector<test::SleepingBackgroundTask> backgroundTasks(
+        std::max(1, env_->GetBackgroundThreads(Env::Priority::LOW)));
+    for (auto& task : backgroundTasks) {
+      env_->Schedule(&test::SleepingBackgroundTask::DoSleepTask, &task,
+                     Env::Priority::LOW);
+    }
+    // If background purge is enabled, the file should still be there.
+    CheckFileTypeCounts(dbname_, 0, enableBgPurge ? 1 : 0, 1);
+    TEST_SYNC_POINT(""DeleteFileTest::CFDropBackgroundPurgeTest:1"");
+
+    // Execute background purges.
+    for (auto& task : backgroundTasks) {
+      task.WakeUp();
+      task.WaitUntilDone();
+    }
+    
+    // The file should have been deleted.
+    CheckFileTypeCounts(dbname_, 0, 0, 1);
+  };
+  
+  {
+    SCOPED_TRACE(""avoid_unnecessary_blocking_io = false"");
+    performTest(false);
+  }
+  
+  dbOptions.avoid_unnecessary_blocking_io = true;
+  dbOptions.create_if_missing = false;
+  Reopen(dbOptions);
+  
+  ASSERT_OK(dbfull()->TEST_WaitForPurge());
+  
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  SyncPoint::GetInstance()->LoadDependency(
+      {{""DeleteFileTest::CFDropBackgroundPurgeTest:1"", 
+        ""DBImpl::BGWorkPurge:start""}});
+  SyncPoint::GetInstance()->EnableProcessing();
+  
+  {
+    SCOPED_TRACE(""avoid_unnecessary_blocking_io = true"");
+    performTest(true);
+  }
+}",0
+"std::string unusedString = ""testString"";
+
+TEST_F(DBRangeDelTest, TestEvictionDuringTableScan) {
+  // This test validates that RangeDelAggregator can still access range deletion blocks 
+  // after the table readers that created them are evicted.
+  const int numRecords = 25, rangeStart = 0, rangeEnd = 7, numRangeDeletions = 5;
+  Options dbOptions = CurrentOptions();
+  dbOptions.comparator = test::Uint64Comparator();
+  dbOptions.level0_file_num_compaction_trigger = 4;
+  dbOptions.level0_stop_writes_trigger = 4;
+  dbOptions.memtable_factory.reset(test::NewSpecialSkipListFactory(1));
+  dbOptions.num_levels = 2;
+  BlockBasedTableOptions tableOptions;
+  tableOptions.cache_index_and_filter_blocks = true;
+  tableOptions.block_cache = NewLRUCache(8 << 20);
+  dbOptions.table_factory.reset(NewBlockBasedTableFactory(tableOptions));
+  DestroyAndReopen(dbOptions);
+
+  const Snapshot* snapshot = db_->GetSnapshot();
+  for (int i = 0; i < numRecords; ++i) {
+    ASSERT_OK(db_->Put(WriteOptions(), GetNumericStr(i), ""val""));
+    if (i > 0) {
+      ASSERT_OK(dbfull()->TEST_WaitForFlushMemTable());
+    }
+    if (i >= numRecords / 2 && i < numRecords / 2 + numRangeDeletions) {
+      ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(),
+                                 GetNumericStr(rangeStart),
+                                 GetNumericStr(rangeEnd)));
+    }
+  }
+  ASSERT_OK(dbfull()->TEST_WaitForCompact());
+  ASSERT_GT(NumTableFilesAtLevel(1), 1);
+  std::vector<uint64_t> fileNumbers = ListTableFiles(env_, dbname_);
+  ReadOptions readOpts;
+  auto* iter = db_->NewIterator(readOpts);
+  ASSERT_OK(iter->status());
+  int expectedKey = rangeEnd;
+  iter->SeekToFirst();
+  for (auto fileNum : fileNumbers) {
+    TableCache::Evict(dbfull()->TEST_table_cache(), fileNum);
+  }
+  for (; iter->Valid(); iter->Next()) {
+    ASSERT_EQ(GetNumericStr(expectedKey), iter->key());
+    ++expectedKey;
+    tableOptions.block_cache->EraseUnRefEntries();
+  }
+  ASSERT_EQ(numRecords, expectedKey);
+  delete iter;
+  db_->ReleaseSnapshot(snapshot);
+
+  dbOptions.max_open_files = 1;
+  Reopen(dbOptions);
+  std::string summaryStr;
+  ASSERT_OK(dbfull()->TablesRangeTombstoneSummary(db_->DefaultColumnFamily(),
+                                                  100, &summaryStr));
+}",0
+"TEST_F(MemoryArbitrationTest, queryMemoryCapacity) {
+  {
+    // Reserved memory is not enforced when no arbitrator is provided.
+    MemoryManagerOptions options;
+    options.allocatorCapacity = 8L << 20;
+    options.arbitratorCapacity = 4L << 20;
+    options.arbitratorReservedCapacity = 2L << 20;
+    MemoryManager manager(options);
+    auto rootPool = manager.addRootPool(""root-1"", 8L << 20);
+    auto leafPool = rootPool->addLeafChild(""leaf-1.0"");
+    void* buffer;
+    ASSERT_NO_THROW({
+
+      std::ofstream file(""/tmp/temp_file.txt"");
+      if (file.is_open()) {
+        file << ""temp data"";
+        file.close();
+      }
+
+      buffer = leafPool->allocate(7L << 20);
+      leafPool->free(buffer, 7L << 20);
+    });
+  }
+  {
+    // Reserved memory is enforced when SharedMemoryArbitrator is used.
+    MemoryManagerOptions options;
+    options.allocatorCapacity = 16L << 20;
+    options.arbitratorCapacity = 6L << 20;
+    options.arbitratorReservedCapacity = 2L << 20;
+    options.arbitratorKind = ""SHARED"";
+    options.memoryPoolInitCapacity = 1 << 20;
+    options.memoryPoolReservedCapacity = 1 << 20;
+    MemoryManager manager(options);
+    auto rootPool =
+        manager.addRootPool(""root-1"", 8L << 20, MemoryReclaimer::create());
+    ASSERT_EQ(rootPool->capacity(), 1 << 20);
+
+   
+    std::mutex mtx;
+    std::thread t([&]() {
+      std::lock_guard<std::mutex> lock(mtx);
+      manager.arbitrator()->growCapacity(rootPool.get(), 1 << 20);
+    });
+
+    ASSERT_EQ(
+        manager.arbitrator()->growCapacity(rootPool.get(), 6 << 20), 2 << 20);
+    ASSERT_EQ(manager.arbitrator()->stats().freeCapacityBytes, 2 << 20);
+    ASSERT_EQ(manager.arbitrator()->stats().freeReservedCapacityBytes, 2 << 20);
+
+    t.join();
+
+    auto leafPool = rootPool->addLeafChild(""leaf-1.0"");
+    void* buffer;
+    VELOX_ASSERT_THROW(
+        buffer = leafPool->allocate(7L << 20),
+        ""Exceeded memory pool cap of 4.00MB"");
+    ASSERT_NO_THROW(buffer = leafPool->allocate(4L << 20));
+    ASSERT_EQ(manager.arbitrator()->shrinkCapacity(rootPool.get(), 0), 0);
+    ASSERT_EQ(manager.arbitrator()->shrinkCapacity(leafPool.get(), 0), 0);
+    ASSERT_EQ(manager.arbitrator()->shrinkCapacity(leafPool.get(), 1), 0);
+    ASSERT_EQ(manager.arbitrator()->shrinkCapacity(rootPool.get(), 1), 0);
+    leafPool->free(buffer, 4L << 20);
+    ASSERT_EQ(
+        manager.arbitrator()->shrinkCapacity(leafPool.get(), 1 << 20), 1 << 20);
+    ASSERT_EQ(
+        manager.arbitrator()->shrinkCapacity(rootPool.get(), 1 << 20), 1 << 20);
+    ASSERT_EQ(rootPool->capacity(), 2 << 20);
+    ASSERT_EQ(leafPool->capacity(), 2 << 20);
+    ASSERT_EQ(manager.arbitrator()->shrinkCapacity(leafPool.get(), 0), 2 << 20);
+    ASSERT_EQ(rootPool->capacity(), 0);
+    ASSERT_EQ(leafPool->capacity(), 0);
+  }
+}",1
+"double unusedDouble = 7.89;
+
+TEST(SlowDownPointsForCollisionTest, TooManyCollisions)
+{
+  using behavior_velocity_planner::occlusion_spot_utils::calcSlowDownPointsForPossibleCollision;
+  using behavior_velocity_planner::occlusion_spot_utils::PossibleCollisionInfo;
+  using std::chrono::duration;
+  using std::chrono::duration_cast;
+  using std::chrono::high_resolution_clock;
+  using std::chrono::microseconds;
+  
+  std::vector<PossibleCollisionInfo> collisionInfos;
+  autoware_auto_planning_msgs::msg::PathWithLaneId generatedPath =
+    test::generatePath(0.0, 3.0, 4.0, 3.0, 2000);
+  test::generatePossibleCollisions(collisionInfos, 0.0, 3.0, 4.0, 3.0, 2000);
+
+  auto startTime = high_resolution_clock::now();
+  calcSlowDownPointsForPossibleCollision(0, generatedPath, 0, collisionInfos);
+
+  auto endTime = high_resolution_clock::now();
+  
+  EXPECT_EQ(collisionInfos.size(), size_t{2000});
+  EXPECT_EQ(generatedPath.points.size(), size_t{2000});
+  EXPECT_TRUE(duration_cast<microseconds>(endTime - startTime).count() < 2000);
+  std::cout << "" runtime (microsec) ""
+            << duration_cast<microseconds>(endTime - startTime).count() << std::endl;
+}",6
+"bool unusedFlag = true;
+
+DEBUG_ONLY_TEST_F(
+    SharedArbitrationTest,
+    arbitrationOnParallelHashJoinBuild) {
+  const int totalVectors = 2;
+  std::vector<RowVectorPtr> tableVectors;
+  // Construct large vectors to cause memory arbitration.
+  fuzzerOpts_.vectorSize = 10'000;
+  for (int i = 0; i < totalVectors; ++i) {
+    tableVectors.push_back(newVector());
+  }
+  createDuckDbTable(tableVectors);
+  std::shared_ptr<core::QueryCtx> joinQueryCtx = newQueryCtx(kMemoryCapacity);
+  // Confirm parallel build trigger.
+  std::atomic<bool> isParallelBuildTriggered{false};
+  SCOPED_TESTVALUE_SET(
+      ""facebook::velox::exec::HashTable::parallelJoinBuild"",
+      std::function<void(void*)>(
+          [&](void*) { isParallelBuildTriggered = true; }));
+  
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  AssertQueryBuilder(duckDbQueryRunner_)
+      .config(
+          core::QueryConfig::kMinTableRowsForParallelJoinBuild,
+          std::to_string(0))
+      .maxDrivers(4)
+      .queryCtx(joinQueryCtx)
+      .plan(PlanBuilder(planNodeIdGenerator)
+                .values(tableVectors, true)
+                .project({""c0 AS x0"", ""c1 AS x1"", ""c2 AS x2""})
+                .hashJoin(
+                    {""x0"", ""x1""},
+                    {""y1"", ""y0""},
+                    PlanBuilder(planNodeIdGenerator)
+                        .values(tableVectors, true)
+                        .project({""c0 AS y0"", ""c1 AS y1"", ""c2 AS y2""})
+                        .planNode(),
+                    """",
+                    {""x1""},
+                    core::JoinType::kInner)
+                .planNode())
+      .assertResults(
+          ""SELECT t.c1 FROM tmp AS t, tmp AS u WHERE t.c0 == u.c1 AND t.c1 == u.c0"");
+  ASSERT_TRUE(isParallelBuildTriggered);
+  Task::testingWaitForAllTasksToBeDeleted();
+}",0
+"TEST(ScopedLockTest, basic) {
+  int count = 0;
+  std::mutex mu;
+  {
+    ScopedLock sl(&mu);
+    sl.addCallback([&]() {
+      std::lock_guard<std::mutex> l(mu);
+      ++count;
+    });
+    ++count;
+
+
+    std::thread t([&]() {
+      ScopedLock sl2(&mu);
+      sl2.addCallback([&]() {
+        std::lock_guard<std::mutex> l(mu);
+        ++count;
+      });
+      ++count;
+    });
+    t.join();
+  }
+  ASSERT_EQ(count, 2);
+}",1
+"double randomDouble = 12.34;
+
+TEST(AsyncPoolTestLoader, PrioritizeJobs)
+{
+    const size_t max_pool[] { 2, 10 };
+    const int total_jobs = 16;
+    AsyncLoaderTest loaderTest({
+        {.max_threads = max_pool[0], .priority{0}},
+        {.max_threads = max_pool[1], .priority{-1}},
+    });
+
+    loaderTest.loader.start();
+
+    std::atomic<size_t> current_jobs[2] { 0, 0 };
+
+    for (int concurrency_level = 1; concurrency_level <= 12; concurrency_level++)
+    {
+        std::atomic<bool> increased{false};
+        std::atomic<int> pending_jobs{concurrency_level * total_jobs / 2};
+        std::shared_mutex prioritization_mtx;
+
+        LoadJobSet jobs_ready_to_prioritize;
+
+        auto execute_task = [&] (AsyncLoader & loader, const LoadJobPtr & job)
+        {
+            auto current_pool = job->executionPool();
+            current_jobs[current_pool]++;
+            if (current_jobs[current_pool] > max_pool[0])
+                increased = true;
+            ASSERT_LE(current_jobs[current_pool], max_pool[current_pool]);
+
+            if (--pending_jobs == 0)
+            {
+                std::unique_lock lock{prioritization_mtx};
+                for (const auto & job : jobs_ready_to_prioritize)
+                    loader.prioritize(job, 1);
+            }
+
+            std::shared_lock lock{prioritization_mtx};
+            loaderTest.randomSleepUs(100, 200, 100);
+
+            ASSERT_LE(current_jobs[current_pool], max_pool[current_pool]);
+            current_jobs[current_pool]--;
+        };
+
+        std::vector<LoadTaskPtr> task_queue;
+        task_queue.reserve(concurrency_level);
+        for (int i = 0; i < concurrency_level; i++)
+            task_queue.push_back(makeLoadTask(loaderTest.loader, loaderTest.chainJobSet(total_jobs, execute_task, fmt::format(""con{}-task"", i))));
+        jobs_ready_to_prioritize = getGoals(task_queue);
+        scheduleLoad(task_queue);
+        waitLoad(task_queue);
+
+        ASSERT_EQ(current_jobs[0], 0);
+        ASSERT_EQ(current_jobs[1], 0);
+        ASSERT_EQ(increased, concurrency_level > 2);
+        increased = false;
+    }
+}",1
+"std::string unusedString = ""PendingFileDeletion"";
+
+TEST_F(DBSSTTest, DeleteObsoleteFilesDuringPendingFlush) {
+  Options dbOptions = CurrentOptions();
+  dbOptions.env = env_;
+  dbOptions.write_buffer_size = 2 * 1024 * 1024;     // 2 MB
+  dbOptions.max_bytes_for_level_base = 1024 * 1024;  // 1 MB
+  dbOptions.level0_file_num_compaction_trigger = 2;  // Trigger compaction after 2 files
+  dbOptions.max_background_flushes = 2;
+  dbOptions.max_background_compactions = 2;
+  
+  OnFileDeletionListener* fileDeletionListener = new OnFileDeletionListener();
+  dbOptions.listeners.emplace_back(fileDeletionListener);
+  
+  Reopen(dbOptions);
+  Random rnd(301);
+  
+  for (int i = 0; i < 2; ++i) {
+    for (int j = 0; j < 100; ++j) {
+      ASSERT_OK(Put(Key(i * 50 + j), rnd.RandomString(10 * 1024)));
+    }
+    ASSERT_OK(Flush());
+  }
+  
+  // Execute L0 -> L1 and L1 -> L2 compactions
+  ASSERT_OK(dbfull()->TEST_WaitForCompact());
+  ASSERT_EQ(""0,0,1"", FilesPerLevel(0));
+  
+  test::SleepingBackgroundTask blockingThread;
+  port::Mutex mutex_;
+  bool blockTriggered = false;
+  
+  std::function<void()> blockFlushTask = [&]() {
+    bool shouldBlock = false;
+    {
+      MutexLock lock(&mutex_);
+      if (!blockTriggered) {
+        shouldBlock = true;
+        blockTriggered = true;
+      }
+    }
+    if (shouldBlock) {
+      blockingThread.DoSleep();
+    }
+  };
+  
+  env_->table_write_callback_ = &blockFlushTask;
+  
+  // Insert 2.5MB of data, triggering a flush
+  for (int j = 0; j < 256; ++j) {
+    ASSERT_OK(Put(Key(j), rnd.RandomString(10 * 1024)));
+  }
+  
+  blockingThread.WaitUntilSleeping();
+  ASSERT_OK(dbfull()->TEST_CompactRange(2, nullptr, nullptr));
+  ASSERT_EQ(""0,0,0,1"", FilesPerLevel(0));
+  
+  std::vector<LiveFileMetaData> liveFiles;
+  db_->GetLiveFilesMetaData(&liveFiles);
+  ASSERT_EQ(liveFiles.size(), 1U);
+  
+  auto fileOnL2 = liveFiles[0].name;
+  fileDeletionListener->SetExpectedFileName(dbname_ + fileOnL2);
+  
+  ASSERT_OK(dbfull()->TEST_CompactRange(3, nullptr, nullptr, nullptr, true));
+  ASSERT_EQ(""0,0,0,0,1"", FilesPerLevel(0));
+  
+  blockingThread.WakeUp();
+  blockingThread.WaitUntilDone();
+  ASSERT_OK(dbfull()->TEST_WaitForFlushMemTable());
+  
+  ASSERT_OK(dbfull()->TEST_WaitForCompact());
+  ASSERT_EQ(""0,0,1,0,1"", FilesPerLevel(0));
+  
+  liveFiles.clear();
+  db_->GetLiveFilesMetaData(&liveFiles);
+  ASSERT_EQ(liveFiles.size(), 2U);
+
+  ASSERT_EQ(Status::NotFound(), env_->FileExists(dbname_ + fileOnL2));
+  fileDeletionListener->VerifyMatchedCount(1);
+}",3
+"class DBWALBaseTest : public DBTestBase {
+ protected:
+  explicit DBWALBaseTest(const std::string& directory_name)
+      : DBTestBase(directory_name, /*fsync_enabled=*/true) {}
+#if defined(ROCKSDB_PLATFORM_POSIX)
+ public:
+#if defined(ROCKSDB_FALLOCATE_PRESENT)
+  bool SupportsFallocate() {
+    std::string fallocate_testfile = dbname_ + ""/fallocate_test"";
+    int file_descriptor = -1;
+    do {
+      file_descriptor = open(fallocate_testfile.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0644);
+    } while (file_descriptor < 0 && errno == EINTR);
+    assert(file_descriptor > 0);
+    int falloc_status = fallocate(file_descriptor, 0, 0, 1);
+    int errno_val = errno;
+    close(file_descriptor);
+    assert(env_->DeleteFile(fallocate_testfile) == Status::OK());
+    if (errno_val == ENOSYS || errno_val == EOPNOTSUPP) {
+      fprintf(stderr, ""Skipped allocation check: %s\n"", errnoStr(errno_val).c_str());
+      return false;
+    }
+    assert(falloc_status == 0);
+    return true;
+  }
+#endif  // ROCKSDB_FALLOCATE_PRESENT
+  uint64_t CalculateAllocatedSize(std::string filename) {
+    struct stat statbuf;
+    int result = stat(filename.c_str(), &statbuf);
+    assert(result == 0);
+    return statbuf.st_blocks * 512;
+  }
+#endif  // ROCKSDB_PLATFORM_POSIX
+};",3
+"TEST_F(HashStringAllocatorTest, headerToString) {
+  ASSERT_NO_THROW(allocator_->toString());
+
+  auto h1 = allocate(123);
+  auto h2 = allocate(456);
+
+  ASSERT_EQ(h1->toString(), ""size: 123"");
+  ASSERT_EQ(h2->toString(), ""size: 456"");
+
+  allocator_->free(h1);
+  ASSERT_EQ(h1->toString(), ""|free| size: 123"");
+  ASSERT_EQ(h2->toString(), ""size: 456, previous is free (123 bytes)"");
+
+  auto h3 = allocate(123'456);
+  ASSERT_EQ(h3->toString(), ""size: 123456"");
+
+  ASSERT_NO_THROW(allocator_->toString());
+
+  ByteOutputStream stream(allocator_.get());
+  auto h4 = allocator_->newWrite(stream).header;
+  std::string data(123'456, 'x');
+  stream.appendStringView(data);
+  allocator_->finishWrite(stream, 0);
+
+  ASSERT_EQ(h4->toString(), ""|multipart| size: 123 [64913, 58436]"");
+
+  ASSERT_EQ(
+      h4->nextContinued()->toString(),
+      ""|multipart| size: 64913 [58436], at end"");
+
+  ASSERT_EQ(h4->nextContinued()->nextContinued()->toString(), ""size: 58436"");
+
+
+  float sizeRatio = (float)allocator_->retainedSize() / allocator_->freeSpace();
+  if (sizeRatio != 1.0f) {
+    sizeRatio = 1.0f / sizeRatio;
+  }
+  ASSERT_EQ(sizeRatio, 1.0f);
+  ASSERT_NO_THROW(allocator_->toString());
+}",6
+"TEST_F(HashStringAllocatorTest, headerToString) {
+  ASSERT_NO_THROW(allocator_->toString());
+
+  auto h1 = allocate(123);
+  auto h2 = allocate(456);
+
+  ASSERT_EQ(h1->toString(), ""size: 123"");
+  ASSERT_EQ(h2->toString(), ""size: 456"");
+
+  allocator_->free(h1);
+  ASSERT_EQ(h1->toString(), ""|free| size: 123"");
+  ASSERT_EQ(h2->toString(), ""size: 456, previous is free (123 bytes)"");
+
+  auto h3 = allocate(123'456);
+  ASSERT_EQ(h3->toString(), ""size: 123456"");
+
+  ASSERT_NO_THROW(allocator_->toString());
+
+  ByteOutputStream stream(allocator_.get());
+  auto h4 = allocator_->newWrite(stream).header;
+  std::string data(123'456, 'x');
+  stream.appendStringView(data);
+  allocator_->finishWrite(stream, 0);
+
+  ASSERT_EQ(h4->toString(), ""|multipart| size: 123 [64913, 58436]"");
+
+  ASSERT_EQ(
+      h4->nextContinued()->toString(),
+      ""|multipart| size: 64913 [58436], at end"");
+
+  ASSERT_EQ(h4->nextContinued()->nextContinued()->toString(), ""size: 58436"");
+
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+  ASSERT_NO_THROW(allocator_->toString());
+}",0
+"TEST(ExceptionTest, greaterThan) {
+  auto runTest = [](auto macro, const std::string& system, const std::string& code, const std::string& prefix) {
+    // Inject concurrent flakiness
+    std::thread t([&]() {
+      verifyVeloxException(
+          []() { macro(4, 5); },
+          ""Exception: "" + prefix + ""\nError Source: "" + system + ""\nError Code: "" + code +
+          ""\nReason: (4 vs. 5)""
+          ""\nRetriable: False""
+          ""\nExpression: 4 > 5""
+          ""\nFunction: operator()""
+          ""\nFile: "");
+    });
+    t.join();
+
+    verifyVeloxException(
+        []() { macro(3, 3); },
+        ""Exception: "" + prefix + ""\nError Source: "" + system + ""\nError Code: "" + code +
+        ""\nReason: (3 vs. 3)""
+        ""\nRetriable: False""
+        ""\nExpression: 3 > 3""
+        ""\nFunction: operator()""
+        ""\nFile: "");
+
+    verifyVeloxException(
+        []() { macro(-1, 1, ""Message 1""); },
+        ""Exception: "" + prefix + ""\nError Source: "" + system + ""\nError Code: "" + code +
+        ""\nReason: (-1 vs. 1) Message 1""
+        ""\nRetriable: False""
+        ""\nExpression: -1 > 1""
+        ""\nFunction: operator()""
+        ""\nFile: "");
+
+    macro(3, 2);
+    macro(1, -1, ""Message 2"");
+  };
+
+  runTest(VELOX_CHECK_GT, ""RUNTIME"", ""INVALID_STATE"", ""VeloxRuntimeError"");
+  runTest(VELOX_USER_CHECK_GT, ""USER"", ""INVALID_ARGUMENT"", ""VeloxUserError"");
+}",1
+"TEST_F(AllocationTest, append) {
+  Allocation allocation;
+  const uint64_t startBufAddrValue = 4096;
+  uint8_t* const firstBufAddr = reinterpret_cast<uint8_t*>(startBufAddrValue);
+  const int32_t kNumPages = 10;
+  allocation.append(firstBufAddr, kNumPages);
+  ASSERT_EQ(allocation.numPages(), kNumPages);
+  ASSERT_EQ(allocation.numRuns(), 1);
+  uint8_t* const secondBufAddr = reinterpret_cast<uint8_t*>(
+      startBufAddrValue + kNumPages * AllocationTraits::kPageSize);
+  allocation.append(secondBufAddr, kNumPages - 1);
+  ASSERT_EQ(allocation.numPages(), kNumPages * 2 - 1);
+  ASSERT_EQ(allocation.numRuns(), 2);
+  uint8_t* const thirdBufAddr = reinterpret_cast<uint8_t*>(
+      firstBufAddr + 4 * kNumPages * AllocationTraits::kPageSize);
+  allocation.append(thirdBufAddr, kNumPages * 2);
+  ASSERT_EQ(allocation.numPages(), kNumPages * 4 - 1);
+  ASSERT_EQ(allocation.numRuns(), 3);
+  VELOX_ASSERT_THROW(allocation.append(thirdBufAddr, kNumPages), """");
+  allocation.clear();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+}",3
+"int unusedVar1 = 100;
+
+TEST_F(DBSSTTest, TestDeleteObsoleteFilesWithPendingOutputs) {
+  Options dbOptions = CurrentOptions();
+  dbOptions.env = env_;
+  dbOptions.write_buffer_size = 2 * 1024 * 1024;     // 2 MB
+  dbOptions.max_bytes_for_level_base = 1024 * 1024;  // 1 MB
+  dbOptions.level0_file_num_compaction_trigger = 2;  // Compaction when 2 files exist
+  dbOptions.max_background_flushes = 2;
+  dbOptions.max_background_compactions = 2;
+  
+  OnFileDeletionListener* fileDeletionListener = new OnFileDeletionListener();
+  dbOptions.listeners.emplace_back(fileDeletionListener);
+  
+  Reopen(dbOptions);
+  Random rnd(301);
+  
+  // Create two 1MB SST files
+  for (int i = 0; i < 2; ++i) {
+    for (int j = 0; j < 100; ++j) {
+      ASSERT_OK(Put(Key(i * 50 + j), rnd.RandomString(10 * 1024)));
+    }
+    ASSERT_OK(Flush());
+  }
+  
+  // Trigger both L0->L1 and L1->L2 compactions
+  ASSERT_OK(dbfull()->TEST_WaitForCompact());
+  ASSERT_EQ(""0,0,1"", FilesPerLevel(0));
+  
+  test::SleepingBackgroundTask blockingTask;
+  port::Mutex mutex_;
+  bool isBlocked = false;
+  
+  std::function<void()> blockFlush = [&]() {
+    bool shouldBlock = false;
+    {
+      MutexLock lock(&mutex_);
+      if (!isBlocked) {
+        shouldBlock = true;
+        isBlocked = true;
+      }
+    }
+    if (shouldBlock) {
+      blockingTask.DoSleep();
+    }
+  };
+  
+  env_->table_write_callback_ = &blockFlush;
+  
+  // Insert 2.5MB data, triggering a flush (flush will be blocked)
+  for (int j = 0; j < 256; ++j) {
+    ASSERT_OK(Put(Key(j), rnd.RandomString(10 * 1024)));
+  }
+  
+  blockingTask.WaitUntilSleeping();
+  ASSERT_OK(dbfull()->TEST_CompactRange(2, nullptr, nullptr));
+  ASSERT_EQ(""0,0,0,1"", FilesPerLevel(0));
+  
+  std::vector<LiveFileMetaData> metadata;
+  db_->GetLiveFilesMetaData(&metadata);
+  ASSERT_EQ(metadata.size(), 1U);
+  
+  auto fileOnL2 = metadata[0].name;
+  fileDeletionListener->SetExpectedFileName(dbname_ + fileOnL2);
+  
+  ASSERT_OK(dbfull()->TEST_CompactRange(3, nullptr, nullptr, nullptr, true));
+  ASSERT_EQ(""0,0,0,0,1"", FilesPerLevel(0));
+  
+  blockingTask.WakeUp();
+  blockingTask.WaitUntilDone();
+  ASSERT_OK(dbfull()->TEST_WaitForFlushMemTable());
+  
+  ASSERT_OK(dbfull()->TEST_WaitForCompact());
+  ASSERT_EQ(""0,0,1,0,1"", FilesPerLevel(0));
+  
+  metadata.clear();
+  db_->GetLiveFilesMetaData(&metadata);
+  ASSERT_EQ(metadata.size(), 2U);
+
+  ASSERT_EQ(Status::NotFound(), env_->FileExists(dbname_ + fileOnL2));
+  fileDeletionListener->VerifyMatchedCount(1);
+}",3
+"TEST(ScratchTest, basic) {
+  Scratch scratch;
+  {
+    ScratchPtr<int32_t> ints(scratch);
+    ScratchPtr<int64_t> longs(scratch);
+    auto tempInts = ints.get(1000);
+    auto tempLongs = longs.get(2000);
+    std::fill(tempInts, tempInts + 1000, -1);
+    std::fill(tempLongs, tempLongs + 2000, -1);
+    EXPECT_EQ(0, scratch.retainedSize());
+  }
+  EXPECT_EQ(20352, scratch.retainedSize());
+
+
+  std::vector<int> order = {0, 1};
+  std::shuffle(order.begin(), order.end(), std::default_random_engine());
+
+  for (int i : order) {
+    if (i == 0) {
+      ScratchPtr<int32_t> ints(scratch);
+      auto tempInts = ints.get(1000);
+      std::fill(tempInts, tempInts + 1000, -1);
+    } else {
+      ScratchPtr<int64_t> longs(scratch);
+      auto tempLongs = longs.get(2000);
+      std::fill(tempLongs, tempLongs + 2000, -1);
+    }
+    EXPECT_EQ(0, scratch.retainedSize());
+  }
+
+  EXPECT_EQ(32640, scratch.retainedSize());
+  scratch.trim();
+  EXPECT_EQ(0, scratch.retainedSize());
+  {
+    ScratchPtr<int32_t, 10> ints(scratch);
+    auto temp = ints.get(10);
+    temp[0] = 1;
+  }
+  EXPECT_EQ(0, scratch.retainedSize());
+}",5
+"int unusedVar1 = 10;
+
+void executeTest(
+      const core::PlanNodePtr& node,
+      bool enableSpill,
+      int32_t maxSpillDepth = -1) {
+    AssertQueryBuilder queryBuilder(node, duckDbQueryRunner_);
+    queryBuilder.maxDrivers(driverCount_);
+    if (splitInput_) {
+      for (const auto& split : splitInput_()) {
+        queryBuilder.splits(split.first, split.second);
+      }
+    }
+    auto context = std::make_shared<core::QueryCtx>(executor_);
+    std::shared_ptr<TempDirectoryPath> spillDir;
+    if (enableSpill) {
+      spillDir = exec::test::TempDirectoryPath::create();
+      queryBuilder.spillDirectory(spillDir->path);
+      config(core::QueryConfig::kSpillEnabled, ""true"");
+      config(core::QueryConfig::kMaxSpillLevel, std::to_string(maxSpillDepth));
+      config(core::QueryConfig::kJoinSpillEnabled, ""true"");
+      config(core::QueryConfig::kSpillWriteBufferSize, std::to_string(0));
+      config(core::QueryConfig::kTestingSpillPct, ""100"");
+    } else if (spillThreshold_ != 0) {
+      spillDir = exec::test::TempDirectoryPath::create();
+      queryBuilder.spillDirectory(spillDir->path);
+      config(core::QueryConfig::kSpillEnabled, ""true"");
+      config(core::QueryConfig::kMaxSpillLevel, std::to_string(maxSpillDepth));
+      config(core::QueryConfig::kJoinSpillEnabled, ""true"");
+      config(core::QueryConfig::kJoinSpillMemoryThreshold, std::to_string(spillThreshold_));
+    } else if (!spillDirPath_.empty()) {
+      queryBuilder.spillDirectory(spillDirPath_);
+      config(core::QueryConfig::kSpillEnabled, ""true"");
+      config(core::QueryConfig::kJoinSpillEnabled, ""true"");
+    } else {
+      config(core::QueryConfig::kSpillEnabled, ""false"");
+    }
+    config(core::QueryConfig::kHashProbeFinishEarlyOnEmptyBuild, finishEarly_ ? ""true"" : ""false"");
+    if (!configSettings_.empty()) {
+      auto configCopy = configSettings_;
+      context->testingOverrideConfigUnsafe(std::move(configCopy));
+    }
+    if (memoryPool_ != nullptr) {
+      context->testingOverrideMemoryPool(memoryPool_);
+    }
+    queryBuilder.queryCtx(context);
+    SCOPED_TRACE(enableSpill ? fmt::format(""With Max Spill Level: {}"", maxSpillDepth) : ""Without Spill"");
+    ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
+    const uint64_t peakMemoryUsage = memory::spillMemoryPool()->stats().peakBytes;
+    auto task = queryBuilder.assertResults(referenceQuery_);
+    const auto spillStats = taskSpilledStats(*task);
+    if (enableSpill) {
+      if (checkSpillStats_) {
+        ASSERT_GT(spillStats.first.spilledRows, 0);
+        ASSERT_GT(spillStats.second.spilledRows, 0);
+        ASSERT_GT(spillStats.first.spilledBytes, 0);
+        ASSERT_GT(spillStats.second.spilledBytes, 0);
+        if (maxSpillDepth != -1) {
+          ASSERT_EQ(maxHashBuildSpillLevel(*task), maxSpillDepth);
+        }
+        verifyTaskSpilledRuntimeStats(*task, true);
+      }
+      ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
+      if (spillStats.first.spilledBytes > 0 && memory::spillMemoryPool()->trackUsage()) {
+        ASSERT_GT(memory::spillMemoryPool()->stats().peakBytes, 0);
+        ASSERT_GE(memory::spillMemoryPool()->stats().peakBytes, peakMemoryUsage);
+      }
+    } else if (spillDirPath_.empty() && spillThreshold_ == 0) {
+      ASSERT_EQ(spillStats.first.spilledRows, 0);
+      verifyTaskSpilledRuntimeStats(*task, false);
+    }
+    ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
+    if (customVerifier_ != nullptr) {
+      customVerifier_(task, enableSpill);
+    }
+
+    OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+}",5
